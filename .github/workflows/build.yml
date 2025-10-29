@@ -45,6 +45,7 @@ jobs:
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER_DEV }}
           service_account: ${{ secrets.GCP_RELEASER_SA_DEV }}
+          audience: https://github.com/${{ github.repository }}
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
