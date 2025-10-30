@@ -119,6 +119,135 @@ resource "google_storage_bucket_iam_member" "release_viewer_prod_cloud_build" {
   member = "serviceAccount:${data.google_project.prod.number}@cloudbuild.gserviceaccount.com"
 }
 
+resource "google_project_iam_member" "dev_cloud_build_cf_deployer" {
+  project = var.dev_project_id
+  role    = "roles/cloudfunctions.developer"
+  member  = "serviceAccount:${data.google_project.dev.number}@cloudbuild.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "dev_cloud_build_run_admin" {
+  project = var.dev_project_id
+  role    = "roles/run.admin"
+  member  = "serviceAccount:${data.google_project.dev.number}@cloudbuild.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "dev_cloud_build_sa_user" {
+  project = var.dev_project_id
+  role    = "roles/iam.serviceAccountUser"
+  member  = "serviceAccount:${data.google_project.dev.number}@cloudbuild.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "dev_cloud_build_artifact_writer" {
+  project = var.dev_project_id
+  role    = "roles/artifactregistry.writer"
+  member  = "serviceAccount:${data.google_project.dev.number}@cloudbuild.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "dev_compute_log_writer" {
+  project = var.dev_project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${data.google_project.dev.number}-compute@developer.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "dev_compute_storage_viewer" {
+  project = var.dev_project_id
+  role    = "roles/storage.objectViewer"
+  member  = "serviceAccount:${data.google_project.dev.number}-compute@developer.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "dev_compute_artifact_writer" {
+  project = var.dev_project_id
+  role    = "roles/artifactregistry.writer"
+  member  = "serviceAccount:${data.google_project.dev.number}-compute@developer.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "dev_compute_run_invoker" {
+  project = var.dev_project_id
+  role    = "roles/run.invoker"
+  member  = "serviceAccount:${data.google_project.dev.number}-compute@developer.gserviceaccount.com"
+}
+
+resource "google_service_account_iam_member" "dev_pubsub_token_creator" {
+  service_account_id = "projects/${var.dev_project_id}/serviceAccounts/${data.google_project.dev.number}-compute@developer.gserviceaccount.com"
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-${data.google_project.dev.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "dev_pubsub_invoker" {
+  project = var.dev_project_id
+  role    = "roles/run.invoker"
+  member  = "serviceAccount:service-${data.google_project.dev.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "prod_cloud_build_cf_deployer" {
+  provider = google.prod
+  project  = var.prod_project_id
+  role     = "roles/cloudfunctions.developer"
+  member   = "serviceAccount:${data.google_project.prod.number}@cloudbuild.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "prod_cloud_build_run_admin" {
+  provider = google.prod
+  project  = var.prod_project_id
+  role     = "roles/run.admin"
+  member   = "serviceAccount:${data.google_project.prod.number}@cloudbuild.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "prod_cloud_build_sa_user" {
+  provider = google.prod
+  project  = var.prod_project_id
+  role     = "roles/iam.serviceAccountUser"
+  member   = "serviceAccount:${data.google_project.prod.number}@cloudbuild.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "prod_cloud_build_artifact_writer" {
+  provider = google.prod
+  project  = var.prod_project_id
+  role     = "roles/artifactregistry.writer"
+  member   = "serviceAccount:${data.google_project.prod.number}@cloudbuild.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "prod_compute_log_writer" {
+  provider = google.prod
+  project  = var.prod_project_id
+  role     = "roles/logging.logWriter"
+  member   = "serviceAccount:${data.google_project.prod.number}-compute@developer.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "prod_compute_storage_viewer" {
+  provider = google.prod
+  project  = var.prod_project_id
+  role     = "roles/storage.objectViewer"
+  member   = "serviceAccount:${data.google_project.prod.number}-compute@developer.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "prod_compute_artifact_writer" {
+  provider = google.prod
+  project  = var.prod_project_id
+  role     = "roles/artifactregistry.writer"
+  member   = "serviceAccount:${data.google_project.prod.number}-compute@developer.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "prod_compute_run_invoker" {
+  provider = google.prod
+  project  = var.prod_project_id
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${data.google_project.prod.number}-compute@developer.gserviceaccount.com"
+}
+
+resource "google_service_account_iam_member" "prod_pubsub_token_creator" {
+  service_account_id = "projects/${var.prod_project_id}/serviceAccounts/${data.google_project.prod.number}-compute@developer.gserviceaccount.com"
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-${data.google_project.prod.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "prod_pubsub_invoker" {
+  provider = google.prod
+  project  = var.prod_project_id
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:service-${data.google_project.prod.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
 resource "google_service_account" "releaser" {
   account_id   = var.release_service_account_id
   display_name = var.release_service_account_display_name

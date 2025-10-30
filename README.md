@@ -116,11 +116,23 @@ The workflow runs `pytest` before building artifacts to prevent broken processor
 ## 4) Terraform: DEV
 Edit `infra/dev/variables.tfvars` (create it) with:
 ```hcl
-project_id            = "payments-test-runner-dev"
-artifact_bucket       = "code-releases-payments-dev"
-tsg_artifact_object   = "releases/tsg-v1.0.0.zip"
-worldpay_artifact_object = "releases/worldpay-v1.0.0.zip"
-dev_region            = "us-central1"
+project_id      = "payments-test-runner-dev"
+artifact_bucket = "code-releases-payments-dev"
+
+functions = {
+  tsgpayments = {
+    artifact_object = "releases/tsg-v1.0.0.zip"
+    entry_point     = "run_tsgpayments"
+    regions         = ["us-central1"]
+    schedule        = "*/15 * * * *"
+  }
+  worldpay = {
+    artifact_object = "releases/worldpay-v1.0.0.zip"
+    entry_point     = "run_worldpay"
+    regions         = ["us-central1"]
+    schedule        = "*/15 * * * *"
+  }
+}
 ```
 
 Then:
@@ -131,14 +143,15 @@ terraform plan -var-file=variables.tfvars
 terraform apply -var-file=variables.tfvars
 ```
 
-This creates:
-- Pub/Sub topics
-- Cloud Functions (tsgpayments, worldpay) in `us-central1`
-- Cloud Scheduler jobs (every 15 minutes)
+Each entry in `functions` spins up the supporting Pub/Sub topic(s), Cloud Functions, and Cloud Scheduler jobs for the listed regions. Adjust the cron expression per processor and add/remove regions as needed.
 
-Check logs:
+Check logs (example: latest `tsgpayments` run in dev):
 ```
-gcloud logging read 'resource.type="cloud_run_revision" AND jsonPayload.processor="tsgpayments"' --limit=20 --format=json
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.processor="tsgpayments"' \
+  --project=payments-test-runner-dev \
+  --limit=20 \
+  --format=json
 ```
 
 ---
@@ -146,14 +159,23 @@ gcloud logging read 'resource.type="cloud_run_revision" AND jsonPayload.processo
 ## 5) Terraform: PROD
 Create `infra/prod/variables.tfvars`:
 ```hcl
-project_id              = "payments-test-runner-prod"
-artifact_bucket         = "code-releases-payments-dev" # reading from DEV bucket
-tsg_artifact_object     = "releases/tsg-v1.0.0.zip"
-worldpay_artifact_object= "releases/worldpay-v1.0.0.zip"
+project_id      = "payments-test-runner-prod"
+artifact_bucket = "code-releases-payments-dev" # reading from DEV bucket
 
-region_us1  = "us-central1"
-region_us2  = "us-east4"
-region_latam= "southamerica-east1" # São Paulo
+functions = {
+  tsgpayments = {
+    artifact_object = "releases/tsg-v1.0.0.zip"
+    entry_point     = "run_tsgpayments"
+    regions         = ["us-central1", "us-east4", "southamerica-east1"]
+    schedule        = "*/5 * * * *"
+  }
+  worldpay = {
+    artifact_object = "releases/worldpay-v1.0.0.zip"
+    entry_point     = "run_worldpay"
+    regions         = ["us-central1", "us-east4"]
+    schedule        = "*/5 * * * *"
+  }
+}
 ```
 
 Then:
@@ -164,10 +186,7 @@ terraform plan -var-file=variables.tfvars
 terraform apply -var-file=variables.tfvars
 ```
 
-This creates:
-- tsgpayments in 3 regions (5-minute schedule)
-- worldpay in 2 US regions (5-minute schedule)
-- (Optional) uncomment the South America region blocks in `infra/prod/main.tf` to demo adding a region.
+You can promote new processors or regions by editing the map—no Terraform code changes required. Schedulers inherit the cron value defined per processor.
 
 ---
 
@@ -182,4 +201,4 @@ This creates:
 - We use **CF 2nd gen** + **Pub/Sub** triggers + **Cloud Scheduler** (no HTTP auth path).
 - Cloud Functions run on Python 3.12; keep the runtime consistent when pinning dependencies or building artifacts locally.
 - Logs are plain JSON strings for simplicity; BigQuery export works via Log Sinks later.
-- No Terraform modules or loops to keep it explicit for the demo.
+- Terraform stays module-free but relies on small `for_each` loops so you can manage processors in a single map.

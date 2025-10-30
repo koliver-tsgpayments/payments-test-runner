@@ -31,7 +31,7 @@ htmlcov/
 crash.log
 crash.*.log
 terraform.tfvars
-*.tfvars
+# *.tfvars
 *_override.tf
 *_override.tf.json
 override.tf

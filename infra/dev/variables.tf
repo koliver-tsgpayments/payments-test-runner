@@ -1,16 +1,21 @@
 variable "project_id" {}
-variable "artifact_bucket" {}
 
-# Pin artifacts per processor (uploaded by CI to the dev project's bucket)
-variable "tsg_artifact_object" {
-  description = "GCS object path for TSG function zip (e.g. releases/tsg-<tag>.zip)"
+variable "artifact_bucket" {
+  description = "GCS bucket that stores release artifacts for the processors."
 }
 
-variable "worldpay_artifact_object" {
-  description = "GCS object path for Worldpay function zip (e.g. releases/worldpay-<tag>.zip)"
+variable "functions" {
+  description = "Processor configuration keyed by function name."
+  type = map(object({
+    artifact_object = string
+    entry_point     = string
+    schedule        = string
+    regions         = list(string)
+  }))
 }
 
-# Regions (simple: one region for dev)
-variable "dev_region" {
-  default = "us-central1"
+variable "scheduler_time_zone" {
+  description = "IANA time zone identifier used by Cloud Scheduler jobs."
+  type        = string
+  default     = "America/Denver"
 }

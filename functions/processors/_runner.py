@@ -7,6 +7,9 @@ from typing import Any, Dict, Optional
 
 import requests
 
+# Ensure INFO-level application logs are emitted to Cloud Logging.
+logging.getLogger().setLevel(logging.INFO)
+
 
 def execute(processor: str, url: str, timeout: int = 20) -> Dict[str, Any]:
     """Shared runner that performs the HTTP request and returns the log payload."""
