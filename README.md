@@ -33,9 +33,14 @@ Artifacts are built by GitHub CI on tag and exposed as downloadable workflow art
   curl -X POST http://localhost:8080/tsg | jq
   curl -X POST http://localhost:8080/worldpay | jq
   ```
-- Want to exercise the deployed functions instead? Publish a Pub/Sub message:
+- Want to exercise the deployed functions instead? Publish a Pub/Sub message and tail the logs:
   ```
-  gcloud pubsub topics publish tsgpayments-topic --message='{"action":"run"}' --project payments-test-runner-dev
+  gcloud pubsub topics publish tsgpayments-topic-us-central1 --message='{"action":"run"}' --project=payments-test-runner-dev
+  gcloud logging read \
+    'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.processor="tsgpayments"' \
+    --project=payments-test-runner-dev \
+    --limit=5 \
+    --format=json
   ```
 - Run unit tests locally (mirrors CI):
   ```
