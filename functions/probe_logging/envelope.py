@@ -3,10 +3,8 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Optional
 import threading
-
-from pydantic import BaseModel, Field
 
 # Optional Google Cloud Logging imports will be resolved lazily at runtime.
 _GCLOUD_AVAILABLE = None  # type: Optional[bool]
@@ -22,33 +20,10 @@ def get_last_envelope() -> Optional[Dict[str, Any]]:
     return getattr(_ctx, "last_envelope", None)  # type: ignore[attr-defined]
 
 
-# Schema constants
 SCHEMA_VERSION = "v1"
 DEFAULT_LOG_NAME = "payment-probe"
 DEFAULT_SOURCE = "gcp.payment-probe"
 DEFAULT_SOURCETYPE = "payment_probe"
-
-
-class ProbeLogEvent(BaseModel):
-    schema_version: Literal["v1"] = SCHEMA_VERSION
-    event_id: str
-    function: str
-    region: str
-    target: str
-    status: Literal["OK", "ERROR"]
-    http_status: Optional[int] = None
-    latency_ms: int
-    tenant: str
-    severity: Literal["INFO", "WARNING", "ERROR"]
-    extra: Dict[str, Any] = Field(default_factory=dict)
-
-
-class ProbeLogEnvelope(BaseModel):
-    time: Optional[int] = None
-    host: str
-    source: str = DEFAULT_SOURCE
-    sourcetype: str = DEFAULT_SOURCETYPE
-    event: ProbeLogEvent
 
 
 def new_event_id() -> str:
@@ -60,8 +35,12 @@ def _get_region() -> str:
     return os.getenv("FUNCTION_REGION") or os.getenv("REGION", "unknown")
 
 
-def _get_function_name(fallback: str) -> str:
-    return os.getenv("FUNCTION_NAME") or fallback
+def _get_function_name(fallback_target: str) -> str:
+    return (
+        os.getenv("FUNCTION_TARGET")
+        or os.getenv("FUNCTION_NAME")
+        or f"run_{fallback_target}"
+    )
 
 
 def _get_tenant() -> str:
@@ -133,45 +112,43 @@ def _maybe_init_gcloud_logger(logger: logging.Logger, log_name: str) -> bool:
     return structured_attached
 
 
-def emit_probe_log(event: ProbeLogEvent) -> Dict[str, Any]:
-    """Build and emit the probe envelope via stdlib logging.
+def emit_probe_log(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Build and emit the probe envelope via stdlib or GCL logging.
 
-    Returns the envelope as a plain dict for test/local use.
+    Expects `event` to contain: event_id, function, region, target, status,
+    http_status (optional), latency_ms, tenant, severity, extra (dict).
+    Returns the envelope as a plain dict.
     """
-    # Enrich event fields from environment defaults if they look unset.
-    region = event.region or _get_region()
-    function_name = event.function or _get_function_name(event.target)
-    tenant = event.tenant or _get_tenant()
-
-    # Host preference: use region if known, otherwise function name
+    region = event.get("region") or _get_region()
+    function_name = event.get("function") or _get_function_name(event.get("target", "unknown"))
+    tenant = event.get("tenant") or _get_tenant()
     host = region if region and region != "unknown" else function_name
 
-    envelope = ProbeLogEnvelope(
-        time=int(time.time()),
-        host=host,
-        source=DEFAULT_SOURCE,
-        sourcetype=DEFAULT_SOURCETYPE,
-        event=ProbeLogEvent(
-            schema_version=SCHEMA_VERSION,
-            event_id=event.event_id,
-            function=function_name,
-            region=region,
-            target=event.target,
-            status=event.status,
-            http_status=event.http_status,
-            latency_ms=event.latency_ms,
-            tenant=tenant,
-            severity=event.severity,
-            extra=event.extra or {},
-        ),
-    )
+    envelope_dict: Dict[str, Any] = {
+        "time": int(time.time()),
+        "host": host,
+        "source": DEFAULT_SOURCE,
+        "sourcetype": DEFAULT_SOURCETYPE,
+        "event": {
+            "schema_version": SCHEMA_VERSION,
+            "event_id": event.get("event_id", new_event_id()),
+            "function": function_name,
+            "region": region,
+            "target": event.get("target"),
+            "status": event.get("status"),
+            "http_status": event.get("http_status"),
+            "latency_ms": int(event.get("latency_ms", 0)),
+            "tenant": tenant,
+            "severity": event.get("severity", "INFO"),
+            "extra": event.get("extra", {}) or {},
+        },
+    }
 
-    envelope_dict = json.loads(envelope.model_dump_json())
     _set_last_envelope(envelope_dict)
 
     log_name = _get_log_name()
     logger = logging.getLogger(log_name)
-    level = _severity_to_level(event.severity)
+    level = _severity_to_level(str(event.get("severity", "INFO")))
 
     structured = _maybe_init_gcloud_logger(logger, log_name)
     try:
@@ -189,39 +166,3 @@ def emit_probe_log(event: ProbeLogEvent) -> Dict[str, Any]:
         logging.getLogger().log(level, json.dumps(envelope_dict, separators=(",", ":")))
 
     return envelope_dict
-
-
-# Optional JSON Schema for validation (kept as a string to avoid runtime deps)
-PROBE_LOG_JSON_SCHEMA = r"""
-{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "type": "object",
-  "properties": {
-    "time": { "type": ["integer", "null"] },
-    "host": { "type": "string" },
-    "source": { "const": "gcp.payment-probe" },
-    "sourcetype": { "const": "payment_probe" },
-    "event": {
-      "type": "object",
-      "properties": {
-        "schema_version": { "const": "v1" },
-        "event_id": { "type": "string" },
-        "function": { "type": "string" },
-        "region": { "type": "string" },
-        "target": { "type": "string" },
-        "status": { "enum": ["OK", "ERROR"] },
-        "http_status": { "type": ["integer", "null"] },
-        "latency_ms": { "type": "integer" },
-        "tenant": { "type": "string" },
-        "severity": { "enum": ["INFO", "WARNING", "ERROR"] },
-        "extra": { "type": "object" }
-      },
-      "required": [
-        "schema_version", "event_id", "function", "region", "target",
-        "status", "latency_ms", "tenant", "severity", "extra"
-      ]
-    }
-  },
-  "required": ["host", "source", "sourcetype", "event"]
-}
-"""

@@ -41,10 +41,11 @@ Artifacts are built by GitHub CI on tag and exposed as downloadable workflow art
   ```
 - Want to exercise the deployed functions instead? Publish a Pub/Sub message and tail the logs:
   ```
-  gcloud pubsub topics publish tsgpayments-topic-us-central1 --message='{"action":"run"}' --project=payments-test-runner-dev
+  PROJECT=payments-test-runner-dev
+  gcloud pubsub topics publish tsgpayments-topic-us-central1 --message='{"action":"run"}' --project="$PROJECT"
   gcloud logging read \
-    'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.processor="tsgpayments"' \
-    --project=payments-test-runner-dev \
+    'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.target="tsgpayments"' \
+    --project="$PROJECT" \
     --limit=5 \
     --format=json
   ```
@@ -158,9 +159,10 @@ Each entry in `functions` spins up the supporting Pub/Sub topic(s), Cloud Functi
 
 Check logs (example: latest `tsgpayments` run in dev):
 ```
+PROJECT=payments-test-runner-dev
 gcloud logging read \
-  'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.processor="tsgpayments"' \
-  --project=payments-test-runner-dev \
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.target="tsgpayments"' \
+  --project="$PROJECT" \
   --limit=20 \
   --format=json
 ```
@@ -244,7 +246,7 @@ log stream (default name `payment-probe`). The envelope shape is Splunk‑HEC co
 ```
 
 Key fields you can filter on:
-- `logName=.../logs/payment-probe` (or override with `LOG_NAME`)
+- `labels."python_logger"="payment-probe"` (set by `LOG_NAME`; entries land under `run.googleapis.com/stderr`)
 - `jsonPayload.source="gcp.payment-probe"`
 - `jsonPayload.sourcetype="payment_probe"`
 - `jsonPayload.event.target` (e.g., `tsgpayments`, `worldpay`)
@@ -252,22 +254,38 @@ Key fields you can filter on:
 - `severity` (`INFO`, `WARNING`, `ERROR`)
 
 ### Logs Explorer (UI) examples
-- All probe logs: `logName:"projects/<PROJECT>/logs/payment-probe" jsonPayload.source="gcp.payment-probe"`
-- Only errors: `logName:"projects/<PROJECT>/logs/payment-probe" severity=ERROR`
-- Per target: `jsonPayload.event.target="worldpay"`
-- By tenant: `jsonPayload.event.tenant="default"`
+- All probe logs (simplest): `jsonPayload.source="gcp.payment-probe"`
+- Only errors: `jsonPayload.source="gcp.payment-probe" severity=ERROR`
+- Per target: `jsonPayload.source="gcp.payment-probe" jsonPayload.event.target="worldpay"`
+- Per function: `jsonPayload.source="gcp.payment-probe" jsonPayload.event.function="run_tsgpayments"`
+- By tenant: `jsonPayload.source="gcp.payment-probe" jsonPayload.event.tenant="default"`
 
 ### gcloud examples
 ```
 PROJECT=payments-test-runner-dev
-gcloud logging read \
-  'logName="projects/'"$PROJECT"'/logs/payment-probe" AND jsonPayload.source="gcp.payment-probe"' \
-  --project="$PROJECT" --limit=50 --format=json
+# Simplest: all probe envelopes
+gcloud logging read 'jsonPayload.source="gcp.payment-probe"' --project="$PROJECT" --limit=50 --format=json
 
-gcloud logging read \
-  'logName="projects/'"$PROJECT"'/logs/payment-probe" AND severity=ERROR AND jsonPayload.event.target="tsgpayments"' \
-  --project="$PROJECT" --limit=50 --format=json
+# Narrow by target
+gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.target="tsgpayments"' --project="$PROJECT" --limit=50 --format=json
+
+# Narrow by function entry point (e.g., run_tsgpayments)
+gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.function="run_tsgpayments"' --project="$PROJECT" --limit=50 --format=json
+
+# Only errors (two options)
+gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND severity=ERROR' --project="$PROJECT" --limit=50 --format=json
+gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.status="ERROR"' --project="$PROJECT" --limit=50 --format=json
+
+# Time range filters
+# Last 1 hour
+gcloud logging read 'jsonPayload.source="gcp.payment-probe"' --project="$PROJECT" --freshness=1h --format=json
+
+# Specific window (RFC3339/ISO8601 UTC)
+gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND timestamp>="2025-10-31T00:00:00Z" AND timestamp<="2025-10-31T23:59:59Z"' \
+  --project="$PROJECT" --format=json
 ```
+
+Note: `event.target` is the logical processor alias (e.g., `tsgpayments`, `worldpay`) and stays stable across regions. `event.function` reflects the function entry point name in the runtime. Use either for scoping; `target` is generally simpler.
 
 ### Splunk notes
 - The envelope matches Splunk HEC’s expected shape (`time`, `host`, `source`, `sourcetype`, `event`).

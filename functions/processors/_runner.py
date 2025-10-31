@@ -28,8 +28,8 @@ def execute(processor: str, url: str, timeout: int = 20) -> Dict[str, Any]:
     # Compose return payload using the last emitted event for consistency
     event = get_last_event()
     env = os.getenv("ENV", "dev")
-    region = event.region if event else os.getenv("REGION", "unknown")
-    latency_ms = event.latency_ms if event else None
+    region = event.get("region") if event else os.getenv("REGION", "unknown")
+    latency_ms = event.get("latency_ms") if event else None
     status_code = response.status_code
     ok = 200 <= status_code < 400
 
