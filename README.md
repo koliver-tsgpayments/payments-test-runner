@@ -134,7 +134,7 @@ functions = {
   worldpay = {
     artifact_object = "releases/worldpay-v1.0.0.zip"
     entry_point     = "run_worldpay"
-    regions         = ["us-central1"]
+    regions         = ["us-west4"]
     schedule        = "*/15 * * * *"
   }
 }
