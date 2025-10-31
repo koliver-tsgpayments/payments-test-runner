@@ -40,6 +40,19 @@ jobs:
           zip -r ../dist/tsg-${{ github.ref_name }}.zip . -x '__pycache__/*' -x 'vendor/__pycache__/*'
           zip -r ../dist/worldpay-${{ github.ref_name }}.zip . -x '__pycache__/*' -x 'vendor/__pycache__/*'
 
+      - name: Verify artifact contents
+        run: |
+          set -euo pipefail
+          for z in dist/tsg-${{ github.ref_name }}.zip dist/worldpay-${{ github.ref_name }}.zip; do
+            echo "Checking $z"
+            # List files and normalize away leading './'
+            unzip -l "$z" | awk '{print $4}' | sed 's#^\./##' > /tmp/files.txt
+            echo "--- files in $z ---" && cat /tmp/files.txt
+            grep -q '^probe_logging/envelope.py$' /tmp/files.txt || (echo 'Missing probe_logging/envelope.py' && exit 1)
+            grep -q '^processors/decorators.py$' /tmp/files.txt || (echo 'Missing processors/decorators.py' && exit 1)
+            grep -q '^requirements.txt$' /tmp/files.txt || (echo 'Missing requirements.txt' && exit 1)
+          done
+
       - name: Auth to GCP via OIDC (dev project)
         uses: google-github-actions/auth@v2
         with:

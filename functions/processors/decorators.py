@@ -4,7 +4,12 @@ import time
 import threading
 from typing import Any, Callable, Dict, Optional, TypeVar, cast
 
-from ..logging.envelope import ProbeLogEvent, emit_probe_log, new_event_id
+# Import envelope module in a way that works both locally (package `functions`)
+# and in deployed artifacts (top-level `probe_logging`).
+try:  # Cloud Functions/Run artifact
+    from probe_logging.envelope import ProbeLogEvent, emit_probe_log, new_event_id  # type: ignore
+except Exception:  # Local tests/dev where code resides under `functions/`
+    from ..probe_logging.envelope import ProbeLogEvent, emit_probe_log, new_event_id  # type: ignore
 
 
 F = TypeVar("F", bound=Callable[..., Any])

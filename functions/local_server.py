@@ -30,7 +30,7 @@ class ProcessorRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             # Build a JSON error body using the last emitted event where possible
             try:
-                from .logging.envelope import get_last_envelope
+                from .probe_logging.envelope import get_last_envelope
                 env_payload = get_last_envelope()
                 if env_payload is not None:
                     result = env_payload
@@ -57,7 +57,7 @@ class ProcessorRequestHandler(BaseHTTPRequestHandler):
         # On success, prefer returning the most recent structured envelope
         if status == 200:
             try:
-                from .logging.envelope import get_last_envelope
+                from .probe_logging.envelope import get_last_envelope
 
                 env_payload = get_last_envelope()
                 if env_payload is not None:
