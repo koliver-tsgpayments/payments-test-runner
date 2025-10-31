@@ -100,6 +100,12 @@ def _maybe_init_gcloud_logger(logger: logging.Logger, log_name: str) -> bool:
         return bool(getattr(logger, "_probe_structured", False))  # type: ignore[attr-defined]
 
     structured_attached = False
+    # Only attach the GCL handler when running in a managed environment (Cloud Functions/Run)
+    if not _in_managed_env():
+        setattr(logger, "_probe_configured", True)
+        setattr(logger, "_probe_structured", False)
+        return False
+
     try:
         if _GCLOUD_AVAILABLE is not False:
             # Try import; cache result

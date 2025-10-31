@@ -65,7 +65,7 @@ def probe_entrypoint(*, target_name: str) -> Callable[[F], F]:
 
                 event = ProbeLogEvent(
                     event_id=new_event_id(),
-                    function=_env_function_name(func.__name__),
+                    function=_env_function_name(target_name),
                     region=_env_region(),
                     target=target_name,
                     status="OK",
@@ -85,7 +85,7 @@ def probe_entrypoint(*, target_name: str) -> Callable[[F], F]:
                 }
                 event = ProbeLogEvent(
                     event_id=new_event_id(),
-                    function=_env_function_name(func.__name__),
+                    function=_env_function_name(target_name),
                     region=_env_region(),
                     target=target_name,
                     status="ERROR",

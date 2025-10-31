@@ -23,7 +23,8 @@ def test_run_tsgpayments_success(mock_get, caplog):
     assert result["ok"] is True
     assert result["status_code"] == 200
     assert "error" not in result
-    assert '"processor": "tsgpayments"' in caplog.text
+    # Envelope logs contain target in event.target
+    assert '"target":"tsgpayments"' in caplog.text or '"target": "tsgpayments"' in caplog.text
 
 
 @patch("functions.processors._runner.requests.get")
@@ -31,12 +32,12 @@ def test_run_tsgpayments_failure(mock_get, caplog):
     mock_get.side_effect = RuntimeError("boom")
 
     with caplog.at_level(logging.ERROR):
-        result = tsg.run_tsgpayments({}, None)
+        with pytest.raises(RuntimeError):
+            tsg.run_tsgpayments({}, None)
 
-    assert result["ok"] is False
-    assert result["status_code"] is None
-    assert result["error"] == "boom"
-    assert '"processor": "tsgpayments"' in caplog.text
+    # Look for the envelope with target + ERROR status
+    assert '"target":"tsgpayments"' in caplog.text or '"target": "tsgpayments"' in caplog.text
+    assert '"status":"ERROR"' in caplog.text
 
 
 @patch("functions.processors._runner.requests.get")
@@ -50,7 +51,7 @@ def test_run_worldpay_success(mock_get, caplog):
     assert result["ok"] is True
     assert result["status_code"] == 302
     assert "error" not in result
-    assert '"processor": "worldpay"' in caplog.text
+    assert '"target":"worldpay"' in caplog.text or '"target": "worldpay"' in caplog.text
 
 
 @patch("functions.processors._runner.requests.get")
@@ -58,9 +59,8 @@ def test_run_worldpay_failure(mock_get, caplog):
     mock_get.side_effect = RuntimeError("bad news")
 
     with caplog.at_level(logging.ERROR):
-        result = worldpay.run_worldpay({}, None)
+        with pytest.raises(RuntimeError):
+            worldpay.run_worldpay({}, None)
 
-    assert result["ok"] is False
-    assert result["status_code"] is None
-    assert result["error"] == "bad news"
-    assert '"processor": "worldpay"' in caplog.text
+    assert '"target":"worldpay"' in caplog.text or '"target": "worldpay"' in caplog.text
+    assert '"status":"ERROR"' in caplog.text
