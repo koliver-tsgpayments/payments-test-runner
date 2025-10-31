@@ -48,6 +48,29 @@ resource "google_project_service" "prod" {
   disable_on_destroy = false
 }
 
+# Ensure Artifact Registry repository exists for Cloud Functions builds
+## Allow Cloud Functions service agent to auto-create the gcf-artifacts repo
+resource "google_project_iam_member" "dev_gcf_admin_artifact_admin" {
+  project = var.dev_project_id
+  role    = "roles/artifactregistry.admin"
+  member  = "serviceAccount:service-${data.google_project.dev.number}@gcf-admin-robot.iam.gserviceaccount.com"
+
+  depends_on = [
+    google_project_service.dev["artifactregistry.googleapis.com"],
+  ]
+}
+
+resource "google_project_iam_member" "prod_gcf_admin_artifact_admin" {
+  provider = google.prod
+  project  = var.prod_project_id
+  role     = "roles/artifactregistry.admin"
+  member   = "serviceAccount:service-${data.google_project.prod.number}@gcf-admin-robot.iam.gserviceaccount.com"
+
+  depends_on = [
+    google_project_service.prod["artifactregistry.googleapis.com"],
+  ]
+}
+
 resource "google_storage_bucket" "dev_state" {
   name     = var.dev_state_bucket_name
   project  = var.dev_project_id
@@ -117,6 +140,20 @@ resource "google_storage_bucket_iam_member" "release_viewer_prod_cloud_build" {
   bucket = google_storage_bucket.release.name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${data.google_project.prod.number}@cloudbuild.gserviceaccount.com"
+}
+
+# Allow Cloud Functions (Gen 2) admin robots in dev and prod projects to
+# read artifacts from the dev release bucket during deploys.
+resource "google_storage_bucket_iam_member" "release_viewer_dev_gcf_admin" {
+  bucket = google_storage_bucket.release.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:service-${data.google_project.dev.number}@gcf-admin-robot.iam.gserviceaccount.com"
+}
+
+resource "google_storage_bucket_iam_member" "release_viewer_prod_gcf_admin" {
+  bucket = google_storage_bucket.release.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:service-${data.google_project.prod.number}@gcf-admin-robot.iam.gserviceaccount.com"
 }
 
 resource "google_project_iam_member" "dev_cloud_build_cf_deployer" {

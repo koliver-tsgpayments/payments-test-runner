@@ -179,14 +179,14 @@ functions = {
   tsgpayments = {
     artifact_object = "releases/tsg-v1.0.0.zip"
     entry_point     = "run_tsgpayments"
-    regions         = ["us-central1", "us-east4", "southamerica-east1"]
-    schedule        = "*/5 * * * *"
+    regions         = ["us-central1", "southamerica-east1"]
+    schedule        = "*/10 * * * *"
   }
   worldpay = {
     artifact_object = "releases/worldpay-v1.0.0.zip"
     entry_point     = "run_worldpay"
     regions         = ["us-central1", "us-east4"]
-    schedule        = "*/5 * * * *"
+    schedule        = "*/10 * * * *"
   }
 }
 ```

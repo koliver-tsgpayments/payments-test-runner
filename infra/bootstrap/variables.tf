@@ -20,6 +20,7 @@ variable "required_apis" {
     "cloudfunctions.googleapis.com",
     "eventarc.googleapis.com",
     "run.googleapis.com",
+    "artifactregistry.googleapis.com",
     "pubsub.googleapis.com",
     "cloudscheduler.googleapis.com",
     "logging.googleapis.com",
