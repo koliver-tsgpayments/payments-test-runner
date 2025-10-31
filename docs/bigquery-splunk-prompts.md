@@ -34,11 +34,11 @@ Acknowledge that you understand the project shape, the guardrails, and that the 
 
 ---
 
-### Prompt 2 — Logging Envelope, BigQuery & Pub/Sub Sinks
-We are extending the payments probe project described earlier. Apply the guardrails from Prompt 1. The current system uses Scheduler → Pub/Sub → Cloud Functions (Gen 2); each processor invokes `functions/processors/_runner.execute`. We want to enforce a standard log envelope, export logs to BigQuery and Pub/Sub via Log Router, and leave room for a future Splunk integration. Keep the solution simple, readable, and maintainable.
+### Prompt 2 — BigQuery & Pub/Sub Sinks
+We are extending the payments probe project described earlier. Apply the guardrails from Prompt 1. The current system uses Scheduler → Pub/Sub → Cloud Functions (Gen 2); each processor invokes `functions/processors/_runner.execute`. The standard log envelope in Python is already implemented; this prompt focuses on exporting logs to BigQuery and Pub/Sub via Log Router and leaving room for a future Splunk integration. Keep the solution simple, readable, and maintainable.
 
 ## Goals
-1. Enforce a **standard, versioned log envelope** across all processors in Python while preserving the existing execution flow.
+1. Use the existing **standard, versioned log envelope**; do not modify Python logging in this prompt.
 2. Keep writing logs to **Cloud Logging** (structured) and export them via sinks to:
    - **BigQuery** (dataset for analytics)
    - **Pub/Sub** (integration bus for Splunk or other downstreams)
@@ -54,64 +54,8 @@ We are extending the payments probe project described earlier. Apply the guardra
 - Terraform: extend `infra/{dev,prod}` with new variables/resources. Feature flags (e.g., Splunk toggle) belong in Terraform vars.
 - Keep module boundaries clean (e.g., dedicated logging helper module, optional Terraform modules under `infra/modules` if needed).
 
-## Logging Envelope (Required)
-Emit exactly one structured log entry per probe with this envelope:
-```json
-{
-  "time": <unix epoch seconds>,
-  "host": "<region or function name>",
-  "source": "gcp.payment-probe",
-  "sourcetype": "payment_probe",
-  "event": {
-    "schema_version": "v1",
-    "event_id": "<uuid4>",
-    "function": "<function entry point>",
-    "region": "<gcp region>",
-    "target": "<processor target alias>",
-    "status": "OK" | "ERROR",
-    "http_status": <int|null>,
-    "latency_ms": <int>,
-    "tenant": "<string>",
-    "severity": "INFO" | "WARNING" | "ERROR",
-    "extra": { ...optional... }
-  }
-}
-```
-Notes:
-- You may omit `time` if Cloud Logging timestamps suffice, but include it if straightforward.
-- Keep `extra` minimal and never log sensitive data.
-- Supply a JSON Schema and a Pydantic model so entries can be validated at emit time (fail fast in development and tests).
-
-## Python Work
-1. Add `functions/logging/envelope.py` containing:
-   - `ProbeLogEvent` and `ProbeLogEnvelope` Pydantic models reflecting the envelope above.
-   - `new_event_id()` helper (uuid4 string).
-   - `emit_probe_log(event: ProbeLogEvent) -> ProbeLogEnvelope` that:
-     - Constructs the envelope, reading environment variables in this order: `FUNCTION_REGION` → `REGION` → fallback `"unknown"`; `FUNCTION_NAME` → fallback to the processor name; `TENANT` → fallback `"default"`; keep `ENV` support for compatibility.
-     - Uses `google.cloud.logging.Client()` with custom log name `payment-probe` (configurable via env, default to match Terraform var described below).
-     - Maps the envelope `severity` to Cloud Logging severities.
-     - Returns the envelope dict for downstream use (tests, local server) so existing flows stay functional.
-   - A module-level JSON Schema string constant used by tests.
-
-2. Add `functions/processors/decorators.py` (or similar) with `@probe_entrypoint(target_name: str)` that:
-   - Wraps existing handler functions, records timing, invokes the function, and captures `(http_status, latency_ms)`.
-   - On success, emits the log with `status="OK"`.
-   - On exception, emits `status="ERROR"`, `severity="ERROR"`, includes a terse error summary in `extra`, and re-raises so Cloud Functions marks the invocation as failed.
-   - Guarantees exactly one call to `emit_probe_log` per invocation.
-
-3. Refactor `functions/processors/_runner.py` to:
-   - Keep the `execute(processor: str, url: str, timeout: int = 20)` signature (callers should not change).
-   - Move the HTTP call body into an inner function decorated with `@probe_entrypoint(target_name=processor)` so existing processors call `execute()` unchanged.
-   - Maintain the return payload structure, now sourced from the envelope (`dict(event=..., host=..., etc.)`), so `tests/test_processors.py` can assert on the new shape.
-   - Keep the use of `requests` and existing env fallbacks.
-
-4. Update `functions/processors/tsg.py` and `functions/processors/worldpay.py` to accommodate any changed return values if needed (ideally minimal changes).
-
-5. Extend tests:
-   - Keep `tests/test_processors.py`, updating expectations to match the new envelope while preserving current coverage of success/error flows.
-   - Add `tests/test_logging_envelope.py` to cover Pydantic validation, schema validation, and that `emit_probe_log` writes the expected structure (use `unittest.mock` to avoid real GCP calls).
-
-6. Add `scripts/local_probe_smoke.py` that imports the envelope helpers, fabricates a sample event, and prints the JSON envelope (no live HTTP call). Ensure `python scripts/local_probe_smoke.py` works without GCP credentials.
+## Python Work (Out of Scope Here)
+The Python log envelope is already in place. Do not change function names, signatures, or logging behavior. Focus this prompt on Terraform sinks and Splunk scaffolding only.
 
 ## Terraform Work
 Within `infra/dev` and `infra/prod` (reusing their structure):
@@ -145,17 +89,14 @@ Keep alerting native to GCP so it works before Splunk is enabled:
 - Make sure Terraform documents any manual API enables or notification-channel prerequisites so on-call runbooks stay accurate.
 
 ## Deliverables & Checkpoints
-- Python modules and tests reflecting the new envelope.
 - Terraform updates (environment variables, sinks, dataset, topics, optional alerting).
 - README snippet with quick verification commands.
 - Stepwise checkpoints after major milestones:
-  1. `pytest -q tests/test_logging_envelope.py`
-  2. `python scripts/local_probe_smoke.py`
-  3. Terraform plan/apply in dev (confirm sinks, dataset, topic)
-  4. Cloud Logging verification query
-  5. BigQuery query sanity check
-  6. Pub/Sub message inspection
-  7. Splunk forwarding toggle test (future)
+  1. Terraform plan/apply in dev (confirm sinks, dataset, topic)
+  2. Cloud Logging verification query
+  3. BigQuery query sanity check
+  4. Pub/Sub message inspection
+  5. Splunk forwarding toggle test (future)
 
 Explain any Terraform state considerations, note any manual steps (e.g., enabling APIs), and confirm existing processors continue to function.
 
