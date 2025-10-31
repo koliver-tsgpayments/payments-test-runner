@@ -1,34 +1,38 @@
 import json
 import logging
 import os
-import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import requests
+
+from .decorators import get_last_event, probe_entrypoint
 
 # Ensure INFO-level application logs are emitted to Cloud Logging.
 logging.getLogger().setLevel(logging.INFO)
 
 
 def execute(processor: str, url: str, timeout: int = 20) -> Dict[str, Any]:
-    """Shared runner that performs the HTTP request and returns the log payload."""
-    start = time.time()
-    region = os.getenv("REGION", "unknown")
+    """Shared runner that performs the HTTP request and returns the payload.
+
+    The structured logging envelope is emitted by the @probe_entrypoint decorator.
+    """
+
+    @probe_entrypoint(target_name=processor)
+    def _http_call(target_url: str, request_timeout: int):
+        return requests.get(target_url, timeout=request_timeout)
+
+    # Perform the call (decorator emits exactly one envelope)
+    response = _http_call(url, timeout)
+
+    # Compose return payload using the last emitted event for consistency
+    event = get_last_event()
     env = os.getenv("ENV", "dev")
+    region = event.region if event else os.getenv("REGION", "unknown")
+    latency_ms = event.latency_ms if event else None
+    status_code = response.status_code
+    ok = 200 <= status_code < 400
 
-    status_code: Optional[int] = None
-    ok = False
-    error: Optional[str] = None
-
-    try:
-        response = requests.get(url, timeout=timeout)
-        status_code = response.status_code
-        ok = 200 <= response.status_code < 400
-    except Exception as exc:  # pragma: no cover - exercised via tests
-        error = str(exc)
-
-    elapsed_ms = int((time.time() - start) * 1000)
     payload: Dict[str, Any] = {
         "processor": processor,
         "env": env,
@@ -36,14 +40,8 @@ def execute(processor: str, url: str, timeout: int = 20) -> Dict[str, Any]:
         "url": url,
         "status_code": status_code,
         "ok": ok,
-        "latency_ms": elapsed_ms,
+        "latency_ms": latency_ms if latency_ms is not None else 0,
         "ts": datetime.now(timezone.utc).isoformat(),
     }
-
-    if error:
-        payload["error"] = error
-        logging.error(json.dumps(payload))
-    else:
-        logging.info(json.dumps(payload))
 
     return payload

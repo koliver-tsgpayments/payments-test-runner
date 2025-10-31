@@ -10,7 +10,7 @@ Artifacts are built by GitHub CI on tag and exposed as downloadable workflow art
 - **Dev**: one region (`us-central1` by default)
 - **Prod**: three regions (`us-central1`, `us-east4`, `southamerica-east1`). 
   - A commented South America region for `worldpay` shows how to add/remove regions.
-- Structured JSON logs with `env`, `region`, `latency_ms`, `status_code`, `ok`, `error`.
+- Structured probe envelope logs with stable fields (Splunk‑friendly).
 
 > Note on regions: as of Oct 29, 2025, GCP has **no GA Mexico region**. Closest LATAM regions are São Paulo (`southamerica-east1`) and Santiago (`southamerica-west1`).
 
@@ -23,15 +23,21 @@ Artifacts are built by GitHub CI on tag and exposed as downloadable workflow art
 - pytest (optional; run unit tests locally the same way CI does)
 
 ## 1) Local testing
-- Start the lightweight HTTP shim (returns the same JSON payload logged in Cloud Functions):
+- Start the lightweight HTTP shim (returns the structured envelope JSON and also emits it to logs):
   ```
   pip install -r functions/requirements.txt
   python -m functions.local_server
   ```
-  The server listens on `http://0.0.0.0:8080` by default (override with `LOCAL_SERVER_PORT`). Hit it with curl or Postman:
+  The server listens on `http://0.0.0.0:8080` by default (override with `LOCAL_SERVER_PORT`).
+  The HTTP response is the structured envelope; it’s also printed to the console.
+  Hit it with curl or Postman:
   ```
   curl -X POST http://localhost:8080/tsg | jq
   curl -X POST http://localhost:8080/worldpay | jq
+  ```
+  Example response/log line (envelope):
+  ```
+  {"time":1730400000,"host":"local","source":"gcp.payment-probe","sourcetype":"payment_probe","event":{"schema_version":"v1","event_id":"...","function":"run_tsgpayments","region":"local","target":"tsgpayments","status":"OK","http_status":200,"latency_ms":123,"tenant":"default","severity":"INFO","extra":{}}}
   ```
 - Want to exercise the deployed functions instead? Publish a Pub/Sub message and tail the logs:
   ```
@@ -205,5 +211,79 @@ You can promote new processors or regions by editing the map—no Terraform code
 ## Notes
 - We use **CF 2nd gen** + **Pub/Sub** triggers + **Cloud Scheduler** (no HTTP auth path).
 - Cloud Functions run on Python 3.12; keep the runtime consistent when pinning dependencies or building artifacts locally.
-- Logs are plain JSON strings for simplicity; BigQuery export works via Log Sinks later.
+- Logs use a structured envelope (via Google Cloud StructuredLogHandler when available),
+  making them easy to filter in Cloud Logging and ready for Splunk ingestion.
+
+---
+
+## Viewing Logs (Cloud Logging + Splunk)
+
+All processors emit exactly one structured JSON envelope per invocation to a dedicated
+log stream (default name `payment-probe`). The envelope shape is Splunk‑HEC compatible:
+
+```
+{
+  "time": 1730400000,
+  "host": "us-central1",
+  "source": "gcp.payment-probe",
+  "sourcetype": "payment_probe",
+  "event": {
+    "schema_version": "v1",
+    "event_id": "b4b0c3c4-6c1c-4f0e-9a2e-6b2a7f9b1d90",
+    "function": "run_tsgpayments",
+    "region": "us-central1",
+    "target": "tsgpayments",
+    "status": "OK",
+    "http_status": 200,
+    "latency_ms": 123,
+    "tenant": "default",
+    "severity": "INFO",
+    "extra": {}
+  }
+}
+```
+
+Key fields you can filter on:
+- `logName=.../logs/payment-probe` (or override with `LOG_NAME`)
+- `jsonPayload.source="gcp.payment-probe"`
+- `jsonPayload.sourcetype="payment_probe"`
+- `jsonPayload.event.target` (e.g., `tsgpayments`, `worldpay`)
+- `jsonPayload.event.status` (`OK` or `ERROR`)
+- `severity` (`INFO`, `WARNING`, `ERROR`)
+
+### Logs Explorer (UI) examples
+- All probe logs: `logName:"projects/<PROJECT>/logs/payment-probe" jsonPayload.source="gcp.payment-probe"`
+- Only errors: `logName:"projects/<PROJECT>/logs/payment-probe" severity=ERROR`
+- Per target: `jsonPayload.event.target="worldpay"`
+- By tenant: `jsonPayload.event.tenant="default"`
+
+### gcloud examples
+```
+PROJECT=payments-test-runner-dev
+gcloud logging read \
+  'logName="projects/'"$PROJECT"'/logs/payment-probe" AND jsonPayload.source="gcp.payment-probe"' \
+  --project="$PROJECT" --limit=50 --format=json
+
+gcloud logging read \
+  'logName="projects/'"$PROJECT"'/logs/payment-probe" AND severity=ERROR AND jsonPayload.event.target="tsgpayments"' \
+  --project="$PROJECT" --limit=50 --format=json
+```
+
+### Splunk notes
+- The envelope matches Splunk HEC’s expected shape (`time`, `host`, `source`, `sourcetype`, `event`).
+- Recommended Splunk search examples:
+  - Errors by target:
+    ```
+    index=<your_index> sourcetype=payment_probe source=gcp.payment-probe 
+    | spath 
+    | search event.status="ERROR" 
+    | stats count by event.target
+    ```
+  - Latency by target (p95):
+    ```
+    index=<your_index> sourcetype=payment_probe source=gcp.payment-probe 
+    | spath 
+    | stats perc95(event.latency_ms) as p95, avg(event.latency_ms) as avg by event.target
+    ```
+- Routing to Splunk (sink/wiring) is out of scope here; use a Logging sink + Pub/Sub + Splunk HEC (or Splunk GCP add‑on). No transformation is needed—forward the envelope as‑is.
 - Terraform stays module-free but relies on small `for_each` loops so you can manage processors in a single map.
