@@ -218,6 +218,90 @@ You can promote new processors or regions by editing the map—no Terraform code
 
 ---
 
+## BigQuery Export (Log Router)
+
+Export only probe envelopes to BigQuery via the project-level Log Router.
+
+- Defaults: `bq_dataset_id=payment_probe`, `bq_location=US`, `enable_bq_sink=true`, `bq_table_expiration_days=null`, `bq_sink_use_partitioned_tables=true`.
+- Filter: `jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.schema_version="v1"`.
+- Toggle: set `enable_bq_sink` in `infra/*/variables.tfvars` (dataset remains if disabled).
+- Note: Most envelopes land in `run_googleapis_com_stderr` (structured logging writes to stderr).
+- More details: see `docs/prompt-bq-sink.md`.
+
+Plan/apply (dev example)
+```
+cd infra/dev
+terraform init
+terraform plan -var-file=variables.tfvars
+terraform apply -var-file=variables.tfvars
+```
+
+Trigger and verify
+```
+PROJECT=payments-test-runner-dev
+gcloud pubsub topics publish tsgpayments-topic-us-central1 --message='{"action":"run"}' --project="$PROJECT"
+gcloud logging sinks list --project="$PROJECT"
+bq ls --project_id "$PROJECT" ${PROJECT}:$(terraform output -raw bq_dataset_id 2>/dev/null || echo payment_probe)
+# Head the partitioned stderr table (most common)
+bq head --project_id "$PROJECT" -n 5 payment_probe.run_googleapis_com_stderr
+```
+
+Query examples (partitioned tables)
+```
+# Last 20 envelopes (stderr), newest first
+bq query --use_legacy_sql=false --project_id="$PROJECT" '
+  SELECT
+    timestamp,
+    jsonPayload.event.target AS target,
+    jsonPayload.event.status AS status,
+    jsonPayload.event.http_status AS http_status,
+    jsonPayload.event.latency_ms AS latency_ms,
+    jsonPayload.region AS region
+  FROM `payment_probe.run_googleapis_com_stderr`
+  WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
+    AND jsonPayload.source = "gcp.payment-probe"
+  ORDER BY timestamp DESC
+  LIMIT 20'
+
+# Count last hour (stderr)
+bq query --use_legacy_sql=false --project_id="$PROJECT" '
+  SELECT COUNT(1)
+  FROM `payment_probe.run_googleapis_com_stderr`
+  WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
+    AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+    AND jsonPayload.source = "gcp.payment-probe"'
+
+# Across both streams (if stdout also exists)
+bq query --use_legacy_sql=false --project_id="$PROJECT" '
+  WITH logs AS (
+    SELECT timestamp, jsonPayload FROM `payment_probe.run_googleapis_com_stderr`
+    WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
+    UNION ALL
+    SELECT timestamp, jsonPayload FROM `payment_probe.run_googleapis_com_stdout`
+    WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
+  )
+  SELECT COUNT(1)
+  FROM logs
+  WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+    AND jsonPayload.source = "gcp.payment-probe"'
+```
+
+If partitioning is disabled (daily-sharded tables)
+```
+# Count last day across shards
+bq query --use_legacy_sql=false --project_id="$PROJECT" '
+  SELECT COUNT(1)
+  FROM `payment_probe.run_googleapis_com_stderr_*`
+  WHERE _TABLE_SUFFIX >= FORMAT_DATE("%Y%m%d", DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
+    AND jsonPayload.source = "gcp.payment-probe"'
+```
+
+Reusing an existing dataset
+```
+terraform import google_bigquery_dataset.probe projects/$PROJECT/datasets/$DATASET_ID
+```
+
+
 ## Viewing Logs (Cloud Logging + Splunk)
 
 All processors emit exactly one structured JSON envelope per invocation to a dedicated

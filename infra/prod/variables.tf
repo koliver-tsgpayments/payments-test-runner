@@ -19,3 +19,33 @@ variable "scheduler_time_zone" {
   type        = string
   default     = "America/Denver"
 }
+
+variable "bq_dataset_id" {
+  description = "BigQuery dataset ID for probe logs."
+  type        = string
+  default     = "payment_probe"
+}
+
+variable "bq_location" {
+  description = "BigQuery dataset location."
+  type        = string
+  default     = "US"
+}
+
+variable "enable_bq_sink" {
+  description = "Enable Log Router sink to BigQuery for probe envelopes."
+  type        = bool
+  default     = true
+}
+
+variable "bq_table_expiration_days" {
+  description = "Default table expiration in days for the dataset (null for none)."
+  type        = number
+  default     = null
+}
+
+variable "bq_sink_use_partitioned_tables" {
+  description = "When true, the Log Router writes to time-partitioned tables instead of daily sharded tables."
+  type        = bool
+  default     = true
+}

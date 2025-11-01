@@ -91,3 +91,36 @@ resource "google_cloud_scheduler_job" "processor" {
     data       = base64encode(jsonencode({ action = "run", env = local.env }))
   }
 }
+
+# BigQuery dataset for probe logs
+resource "google_bigquery_dataset" "probe" {
+  dataset_id                  = var.bq_dataset_id
+  location                    = var.bq_location
+  default_table_expiration_ms = var.bq_table_expiration_days == null ? null : var.bq_table_expiration_days * 24 * 60 * 60 * 1000
+
+  labels = {
+    env = local.env
+  }
+}
+
+# Log Router sink exporting only probe envelopes to BigQuery
+resource "google_logging_project_sink" "probe_to_bq" {
+  count = var.enable_bq_sink ? 1 : 0
+
+  name             = "probe-to-bq"
+  destination      = "bigquery.googleapis.com/projects/${var.project_id}/datasets/${var.bq_dataset_id}"
+  filter           = "jsonPayload.source=\"gcp.payment-probe\" AND jsonPayload.event.schema_version=\"v1\""
+
+  bigquery_options {
+    use_partitioned_tables = var.bq_sink_use_partitioned_tables
+  }
+}
+
+# Grant sink writer identity permissions on the dataset
+resource "google_bigquery_dataset_iam_member" "sink_writer" {
+  count = var.enable_bq_sink ? 1 : 0
+
+  dataset_id = google_bigquery_dataset.probe.dataset_id
+  role       = "roles/bigquery.dataEditor"
+  member     = google_logging_project_sink.probe_to_bq[0].writer_identity
+}
