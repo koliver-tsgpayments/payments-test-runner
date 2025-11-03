@@ -131,6 +131,21 @@ Edit `infra/dev/variables.tfvars` (create it) with:
 project_id      = "payments-test-runner-dev"
 artifact_bucket = "code-releases-payments-dev"
 
+# Optional logging/export toggles (defaults shown)
+# enable_pubsub_sink       = false         # Cloud Logging → Pub/Sub export
+# pubsub_topic_name        = "probe-logs"  # Topic for probe envelopes
+# pubsub_dlq_topic_name    = "probe-logs-dlq" # DLQ topic for future consumers
+# enable_bq_sink           = true          # BigQuery export (Log Router → BQ)
+
+# Optional ops alerts toggles (defaults shown)
+# enable_ops_alerts                = false
+# monitoring_notification_channels = ["projects/$PROJECT/notificationChannels/<ID>"]
+# probe_error_threshold            = 5
+# probe_error_window_sec           = 300
+# enable_pubsub_backlog_alert      = false
+# pubsub_alert_subscription_name   = "probe-logs-splunk"   # when Dataflow is added
+# pubsub_backlog_window_sec        = 600
+
 functions = {
   tsgpayments = {
     artifact_object = "releases/tsg-v1.0.0.zip"
@@ -164,8 +179,110 @@ gcloud logging read \
   'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.target="tsgpayments"' \
   --project="$PROJECT" \
   --limit=20 \
-  --format=json
+--format=json
 ```
+
+### Realtime export to Pub/Sub (Log Router)
+
+This repo supports exporting probe envelopes from Cloud Logging to Pub/Sub via a Log Router sink. Flow:
+
+```
+Cloud Logging → Log Router Sink → Pub/Sub Topic → Subscription(s) → Subscriber(s)
+```
+
+- The sink is the publisher to Pub/Sub. It does not create subscriptions.
+- Defaults in `infra/dev` and `infra/prod`:
+  - `enable_pubsub_sink = false` → sink disabled (no publish to Pub/Sub)
+  - `enable_bq_sink = true` → BigQuery export remains on by default
+  - Topics are created by default and are harmless without subscriptions.
+
+Variables you can toggle in `infra/*/variables.tf` and `.tfvars`:
+- `enable_pubsub_sink` (bool): turn on/off the Logging → Pub/Sub export
+- `pubsub_topic_name` (string): topic name for probe logs (default `probe-logs`)
+
+#### Test with a temporary subscription
+
+1) Enable the sink in dev and apply:
+```
+cd infra/dev
+# in infra/dev/variables.tfvars set: enable_pubsub_sink = true
+terraform init
+terraform apply -var-file=variables.tfvars
+```
+
+2) Create a temporary subscription that auto-expires (24h):
+```
+PROJECT=payments-test-runner-dev
+gcloud pubsub subscriptions create probe-logs-tmp \
+  --topic=probe-logs \
+  --expiration-period=24h \
+  --project="$PROJECT"
+```
+
+3) Trigger a probe run to generate logs (which the sink publishes to Pub/Sub):
+```
+gcloud pubsub topics publish tsgpayments-topic-us-central1 \
+  --message='{"action":"run"}' \
+  --project="$PROJECT"
+```
+
+4) Pull a few messages:
+```
+gcloud pubsub subscriptions pull --auto-ack probe-logs-tmp \
+  --project="$PROJECT" \
+  --limit=5
+```
+
+Quick realtime pull (rerun to see new messages):
+```
+gcloud pubsub subscriptions pull probe-logs-tmp --auto-ack
+```
+
+5) Cleanup:
+- If you didn’t set `--expiration-period`, delete the temp sub:
+  ```
+  gcloud pubsub subscriptions delete probe-logs-tmp --project="$PROJECT"
+  ```
+- Optionally disable the sink:
+  - In `infra/dev/variables.tfvars`, set `enable_pubsub_sink = false`
+  - Apply again: `terraform apply -var-file=variables.tfvars`
+  - If you also want to delete the topics, you can target-destroy them:
+    ```
+    terraform destroy -var-file=variables.tfvars \
+      -target=google_pubsub_topic.probe_logs \
+      -target=google_pubsub_topic.probe_logs_dlq
+    ```
+
+Notes:
+- Subscriptions only receive messages published after they are created.
+- The sink filter is strict: `jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.schema_version="v1"`.
+
+### Streaming to Splunk (Dataflow Template)
+
+Recommended production path to Splunk uses the Google‑provided Dataflow template. High‑level flow:
+
+```
+Cloud Logging → Log Router Sink → Pub/Sub Topic → Subscription → Dataflow (Pub/Sub → Splunk) → Splunk HEC
+```
+
+Why this path
+- Auto‑scales for bursts; Pub/Sub buffers; Dataflow handles backoff/retries.
+- DLQ patterns supported via a dead‑letter topic for failed HEC deliveries.
+- Minimal Splunk footprint; send JSON envelopes directly to HEC.
+
+What you’ll provision (later, via Terraform)
+- A dedicated subscription on `probe-logs` for Dataflow (e.g., `probe-logs-splunk`).
+- A Dataflow streaming job using the “Cloud Pub/Sub to Splunk” template.
+- A worker service account with required roles: `pubsub.subscriber` on the sub, `dataflow.worker`, `storage.objectAdmin` on a staging bucket; `compute.networkUser` if using VPC/NAT.
+- Optional: a DLQ topic (you can reuse `probe-logs-dlq`).
+
+Inputs the template needs
+- Splunk HEC URL (https) and HEC token.
+- Batch size/bytes/interval, max workers, optional gzip.
+- Optional: index, source, sourcetype overrides.
+
+Planned next step
+- See docs/prompt-splunk-dataflow.md for an AI‑ready prompt to wire this with Terraform. We’ll keep it toggleable (disabled by default) and parameterized per environment.
 
 ---
 
@@ -174,6 +291,21 @@ Create `infra/prod/variables.tfvars`:
 ```hcl
 project_id      = "payments-test-runner-prod"
 artifact_bucket = "code-releases-payments-dev" # reading from DEV bucket
+
+# Optional logging/export toggles (defaults shown)
+# enable_pubsub_sink       = false         # Cloud Logging → Pub/Sub export
+# pubsub_topic_name        = "probe-logs"  # Topic for probe envelopes
+# pubsub_dlq_topic_name    = "probe-logs-dlq" # DLQ topic for future consumers
+# enable_bq_sink           = true          # BigQuery export (Log Router → BQ)
+
+# Optional ops alerts toggles (defaults shown)
+# enable_ops_alerts                = false
+# monitoring_notification_channels = ["projects/$PROJECT/notificationChannels/<ID>"]
+# probe_error_threshold            = 5
+# probe_error_window_sec           = 300
+# enable_pubsub_backlog_alert      = false
+# pubsub_alert_subscription_name   = "probe-logs-splunk"   # when Dataflow is added
+# pubsub_backlog_window_sec        = 600
 
 functions = {
   tsgpayments = {

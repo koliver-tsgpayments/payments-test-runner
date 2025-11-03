@@ -1,59 +1,137 @@
-# Prompt — Logs-based Metrics and Alerts (Terraform Only)
+# Prompt — Minimal Ops Alerts (Terraform)
 
-Add basic ops visibility for probe logs using logs-based metrics and alerting. No Python changes.
+Add minimal, native GCP alerting around probe health and (optionally) Pub/Sub backlog. No Python changes.
 
 ## Guardrails
-- Edit only `infra/{dev,prod}`.
-- Keep configuration minimal and easy to toggle.
+- Edit only `infra/{dev,prod}`. Keep module layout intact.
+- No app/runtime changes; Terraform only.
+- Keep alerts low-noise and toggleable.
 
 ## Scope
-- Create two logs-based metrics and simple alert policies per environment.
+- One logs-based metric + alert for probe errors.
+- Optional alert for Pub/Sub backlog on the future Dataflow subscription.
 
-## Goals
-1. Metric: `probe_non_ok_count` — count where `event.status != "OK"`.
-2. Metric: `probe_latency_ms` — distribution on `event.latency_ms`.
-3. Alert: errors burst — e.g., ≥3 non-OKs in 5 minutes.
-4. Alert: high latency — e.g., p95 > threshold over 5 minutes (MQL-based).
+## Variables to Add (per env variables.tf)
+- `enable_ops_alerts` (bool, default `false`) — create alerts when true
+- `monitoring_notification_channels` (list(string), default `[]`) — channel IDs to notify
+- `probe_error_threshold` (number, default `5`) — errors to trigger over window
+- `probe_error_window_sec` (number, default `300`) — evaluation window seconds
+- `enable_pubsub_backlog_alert` (bool, default `false`) — enable backlog alert
+- `pubsub_alert_subscription_name` (string, default `null`) — subscription to watch (e.g., `probe-logs-splunk`)
+- `pubsub_backlog_window_sec` (number, default `600`) — backlog sustained window
 
-## Variables to Add
-Add to `infra/dev/variables.tf` and `infra/prod/variables.tf`:
-- `enable_ops_alerts` (bool, default `false`)
-- `ops_notification_channel_id` (string, default `null`)  # Monitoring channel ID
-- `latency_p95_threshold_ms` (number, default `2000`)
+## Resources to Add (per env main.tf)
+1) Logs‑based metric: probe error count
 
-## Resources (per env in `main.tf`)
-- `google_logging_metric.probe_non_ok_count`:
-  - `filter = "jsonPayload.source=\"gcp.payment-probe\" AND jsonPayload.event.status!=\"OK\""`
-  - `metric_descriptor.metric_kind = "DELTA"`, `value_type = "INT64"`
-- `google_logging_metric.probe_latency_ms`:
-  - `filter = "jsonPayload.source=\"gcp.payment-probe\""`
-  - `metric_descriptor.metric_kind = "DELTA"`, `value_type = "DISTRIBUTION"`, buckets as defaults
-
-- Alerts (created when `enable_ops_alerts` and `ops_notification_channel_id` set):
-  - `google_monitoring_alert_policy.probe_errors_burst`: threshold on `logging.googleapis.com/user/probe_non_ok_count` using a rate or sum over 5m.
-  - `google_monitoring_alert_policy.probe_latency_p95`: MQL condition on p95 of `logging.googleapis.com/user/probe_latency_ms` vs `var.latency_p95_threshold_ms`.
-
-Example MQL (for `probe_latency_p95`):
 ```
-fetch logging.googleapis.com/user/probe_latency_ms
-| align delta(5m)
-| every 1m
-| group_by [], [value_latency_p95: percentile(value.delta, 95)]
-| condition gt(value_latency_p95, ${var.latency_p95_threshold_ms})
+resource "google_logging_metric" "probe_error_count" {
+  count       = var.enable_ops_alerts ? 1 : 0
+  name        = "probe_error_count"
+  description = "Count of probe ERROR envelopes"
+
+  filter = "jsonPayload.source=\"gcp.payment-probe\" AND (jsonPayload.event.status=\"ERROR\" OR severity=ERROR)"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+    labels {
+      key         = "target"
+      value_type  = "STRING"
+      description = "Probe target"
+    }
+  }
+
+  label_extractors = {
+    target = "EXTRACT(jsonPayload.event.target)"
+  }
+}
+```
+
+2) Alert policy: probe errors burst
+
+```
+resource "google_monitoring_alert_policy" "probe_errors" {
+  count        = var.enable_ops_alerts ? 1 : 0
+  display_name = "Probe errors high (last ${var.probe_error_window_sec}s)"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Errors >= ${var.probe_error_threshold} in ${var.probe_error_window_sec}s"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/probe_error_count\" resource.type=\"global\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = var.probe_error_threshold
+      duration        = "${var.probe_error_window_sec}s"
+
+      aggregations {
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_DELTA"
+        cross_series_reducer = "REDUCE_SUM"
+        group_by_fields      = ["metric.label.target"]
+      }
+
+      trigger { count = 1 }
+    }
+  }
+
+  notification_channels = var.monitoring_notification_channels
+}
+```
+
+3) Alert policy (optional): Pub/Sub backlog on Dataflow subscription
+
+```
+resource "google_monitoring_alert_policy" "pubsub_backlog" {
+  count        = var.enable_ops_alerts && var.enable_pubsub_backlog_alert && var.pubsub_alert_subscription_name != null ? 1 : 0
+  display_name = "Pub/Sub backlog high (subscription ${var.pubsub_alert_subscription_name})"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Undelivered messages > 0 for ${var.pubsub_backlog_window_sec}s"
+    condition_threshold {
+      filter          = "metric.type=\"pubsub.googleapis.com/subscription/num_undelivered_messages\" resource.type=\"pubsub_subscription\" resource.label.subscription_id=\"${var.pubsub_alert_subscription_name}\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "${var.pubsub_backlog_window_sec}s"
+
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_MAX"
+      }
+
+      trigger { count = 1 }
+    }
+  }
+
+  notification_channels = var.monitoring_notification_channels
+}
 ```
 
 ## Plan/Apply and Verify
 1. `cd infra/dev && terraform init && terraform plan -var-file=variables.tfvars`
-2. `terraform apply -var-file=variables.tfvars`
-3. Generate a few errors (e.g., temporarily point a processor URL to a 404) to see `probe_non_ok_count` grow.
-4. Check:
-   - `gcloud logging metrics list --project="$PROJECT" | grep probe_`
-   - `gcloud monitoring alert-policies list --project="$PROJECT"`
+2. In `infra/dev/variables.tfvars`, add (example):
+   ```
+   enable_ops_alerts                = true
+   monitoring_notification_channels = ["projects/$PROJECT/notificationChannels/123"]
+   probe_error_threshold            = 5
+   probe_error_window_sec           = 300
+   # Optional when Dataflow/Splunk is added:
+   # enable_pubsub_backlog_alert    = true
+   # pubsub_alert_subscription_name = "probe-logs-splunk"
+   # pubsub_backlog_window_sec      = 600
+   ```
+3. `terraform apply -var-file=variables.tfvars`
+4. Confirm:
+   - Logs-based metric appears in Monitoring Metrics Explorer.
+   - Alert policies exist and show “OK” state.
 
 ## Acceptance Criteria
-- Metrics appear and populate in Monitoring within a few minutes.
-- Alerts evaluate correctly when enabled and send to the provided channel.
-- No impact to function runtime.
+- Logs‑based metric counts ERROR envelopes and extracts `target` label.
+- Alert fires when errors exceed threshold in the window.
+- Optional backlog alert fires when undelivered messages persist for the configured window.
+- Toggling `enable_ops_alerts` plans to remove all added policies/metrics.
 
 ## Out of Scope
-- Splunk dashboards and forwarding; handled in separate prompts.
+- Creating notification channels (PagerDuty/Slack/email); pass existing channel IDs via variable.
+- Dataflow job and subscription wiring (covered in prompt-splunk-dataflow.md).

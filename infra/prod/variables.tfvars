@@ -15,3 +15,5 @@ functions = {
     schedule        = "*/10 * * * *"
   }
 }
+
+enable_pubsub_sink = false
