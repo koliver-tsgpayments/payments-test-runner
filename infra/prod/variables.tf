@@ -49,3 +49,21 @@ variable "bq_sink_use_partitioned_tables" {
   type        = bool
   default     = true
 }
+
+variable "enable_pubsub_sink" {
+  description = "Enable Log Router sink to Pub/Sub for probe envelopes."
+  type        = bool
+  default     = false
+}
+
+variable "pubsub_topic_name" {
+  description = "Pub/Sub topic name for probe logs."
+  type        = string
+  default     = "probe-logs"
+}
+
+variable "pubsub_dlq_topic_name" {
+  description = "Pub/Sub DLQ topic name for future consumers."
+  type        = string
+  default     = "probe-logs-dlq"
+}

@@ -124,3 +124,30 @@ resource "google_bigquery_dataset_iam_member" "sink_writer" {
   role       = "roles/bigquery.dataEditor"
   member     = google_logging_project_sink.probe_to_bq[0].writer_identity
 }
+
+# Pub/Sub topics for probe logs and future DLQ use (always created)
+resource "google_pubsub_topic" "probe_logs" {
+  name = var.pubsub_topic_name
+}
+
+resource "google_pubsub_topic" "probe_logs_dlq" {
+  name = var.pubsub_dlq_topic_name
+}
+
+# Log Router sink exporting only probe envelopes to Pub/Sub (toggleable)
+resource "google_logging_project_sink" "probe_to_pubsub" {
+  count = var.enable_pubsub_sink ? 1 : 0
+
+  name        = "probe-to-pubsub"
+  destination = "pubsub.googleapis.com/${google_pubsub_topic.probe_logs.id}"
+  filter      = "jsonPayload.source=\"gcp.payment-probe\" AND jsonPayload.event.schema_version=\"v1\""
+}
+
+# Grant sink writer identity permission to publish to the topic
+resource "google_pubsub_topic_iam_member" "sink_publisher" {
+  count = var.enable_pubsub_sink ? 1 : 0
+
+  topic  = google_pubsub_topic.probe_logs.name
+  role   = "roles/pubsub.publisher"
+  member = google_logging_project_sink.probe_to_pubsub[0].writer_identity
+}
