@@ -116,53 +116,32 @@ bq head --project_id "$PROJECT" -n 5 payment_probe.run_googleapis_com_stderr
 
 Example BigQuery queries
 ```bash
-# Last 20 envelopes (stderr), newest first (works for partitioned or non‑partitioned)
-bq query --use_legacy_sql=false --project_id="$PROJECT" '
-  SELECT
-    timestamp,
-    jsonPayload.event.target AS target,
-    jsonPayload.event.status AS status,
-    jsonPayload.event.http_status AS http_status,
-    jsonPayload.event.latency_ms AS latency_ms,
-    jsonPayload.region AS region
-  FROM `payment_probe.run_googleapis_com_stderr`
-  WHERE jsonPayload.source = "gcp.payment-probe"
-  ORDER BY timestamp DESC
-  LIMIT 20'
+# Last 20 envelopes (stderr), newest first (zsh‑safe heredoc)
+bq query --use_legacy_sql=false --project_id="$PROJECT" <<'SQL'
+SELECT
+  timestamp,
+  jsonPayload.event.target AS target,
+  jsonPayload.event.status AS status,
+  jsonPayload.event.http_status AS http_status,
+  jsonPayload.event.latency_ms AS latency_ms,
+  COALESCE(
+    jsonPayload.event.region,
+    resource.labels.location,
+    jsonPayload.host
+  ) AS region
+FROM `payment_probe.run_googleapis_com_stderr`
+WHERE jsonPayload.source = "gcp.payment-probe"
+ORDER BY timestamp DESC
+LIMIT 20
+SQL
 
 # Count last hour (stderr)
-bq query --use_legacy_sql=false --project_id="$PROJECT" '
-  SELECT COUNT(1)
-  FROM `payment_probe.run_googleapis_com_stderr`
-  WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
-    AND jsonPayload.source = "gcp.payment-probe"'
-
-# Across both streams (if stdout also exists)
-bq query --use_legacy_sql=false --project_id="$PROJECT" '
-  WITH logs AS (
-    SELECT timestamp, jsonPayload FROM `payment_probe.run_googleapis_com_stderr`
-    UNION ALL
-    SELECT timestamp, jsonPayload FROM `payment_probe.run_googleapis_com_stdout`
-  )
-  SELECT COUNT(1)
-  FROM logs
-  WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
-    AND jsonPayload.source = "gcp.payment-probe"'
-```
-
-Optional: add a partition predicate (if the table shows timePartitioning in `bq show`)
-```bash
-# Append this to reduce scanned data when tables are ingestion‑time partitioned
-#   AND _PARTITIONDATE >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
-```
-
-If partitioning is disabled (daily‑sharded tables)
-```bash
-bq query --use_legacy_sql=false --project_id="$PROJECT" '
-  SELECT COUNT(1)
-  FROM `payment_probe.run_googleapis_com_stderr_*`
-  WHERE _TABLE_SUFFIX >= FORMAT_DATE("%Y%m%d", DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
-    AND jsonPayload.source = "gcp.payment-probe"'
+bq query --use_legacy_sql=false --project_id="$PROJECT" <<'SQL'
+SELECT COUNT(1)
+FROM `payment_probe.run_googleapis_com_stderr`
+WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+  AND jsonPayload.source = "gcp.payment-probe"
+SQL
 ```
 
 Step 5 — Enable Log Router → Pub/Sub sink (toggle in tfvars), then apply
@@ -210,6 +189,24 @@ gcloud pubsub subscriptions create probe-logs-tmp \
   --topic=probe-logs \
   --expiration-period=24h \
   --project="$PROJECT"
+```
+
+Listen live in a separate console (recommended for the demo)
+```bash
+# Console A — create a short‑lived subscription (or reuse probe-logs-tmp)
+SUB="probe-logs-live-$(date +%s)"
+gcloud pubsub subscriptions create "$SUB" --topic=probe-logs --project="$PROJECT"
+
+# Console B — stream messages by polling every 2s and decode JSON payloads
+while true; do
+  gcloud pubsub subscriptions pull "$SUB" \
+    --auto-ack --limit=10 --project="$PROJECT" --format='json' \
+  | jq -r '.[].message.data' | base64 --decode; echo
+  sleep 2
+done
+
+# When finished (Console A)
+gcloud pubsub subscriptions delete "$SUB" --project="$PROJECT"
 ```
 
 Explore logs in Cloud Logging (structured JSON envelope)
