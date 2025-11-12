@@ -281,6 +281,18 @@ Inputs the template needs
 - Batch size/bytes/interval, max workers, optional gzip.
 - Optional: index, source, sourcetype overrides.
 
+Terraform knobs (per env `variables.tfvars`)
+- `enable_pubsub_sink` — turn on the Log Router → Pub/Sub export (creates the topic publisher).
+- `enable_splunk_forwarder` — creates the subscription, service account, IAM, VPC, and runs the Dataflow template.
+- `splunk_hec_url` / `splunk_hec_token` — required template parameters (URL must match the HEC certificate FQDN, no trailing slash).
+- `dataflow_staging_bucket` — temp/staging bucket for Dataflow artifacts.
+- `splunk_hec_insecure_ssl` (dev only) or `splunk_root_ca_gcs_path` — control TLS validation vs. providing a custom PEM chain.
+- `splunk_index`, `splunk_source`, `splunk_sourcetype` — optional overrides applied per event.
+- `splunk_batch_count`, `splunk_batch_bytes`, `splunk_batch_interval_sec` — batching controls; defaults are template-friendly.
+- `splunk_max_workers`, `splunk_machine_type`, `dataflow_region` — govern scaling and placement.
+- `splunk_enable_streaming_engine` — toggles Dataflow Streaming Engine (adds a `-se` suffix to the job name to force recreation).
+- `pubsub_subscription_name`, `pubsub_dlq_topic_name` — dedicated subscription/DLQ names for the forwarder.
+
 Planned next step
 - See docs/prompt-splunk-dataflow.md for an AI‑ready prompt to wire this with Terraform. We’ll keep it toggleable (disabled by default) and parameterized per environment.
 
@@ -505,19 +517,40 @@ Note: `event.target` is the logical processor alias (e.g., `tsgpayments`, `world
 
 ### Splunk notes
 - The envelope matches Splunk HEC’s expected shape (`time`, `host`, `source`, `sourcetype`, `event`).
+- Depending on how Splunk parsed the payload, fields might exist at both `event.*` and `jsonPayload.event.*`. The following pattern runs a single `| spath` and then uses `coalesce()` to grab whichever copy is present.
 - Recommended Splunk search examples:
-  - Errors by target:
+  - Latest payment probe (dev → `tsgpayments`, last 24h):
     ```
-    index=<your_index> sourcetype=payment_probe source=gcp.payment-probe 
-    | spath 
-    | search event.status="ERROR" 
-    | stats count by event.target
+    index=payments earliest=-24h latest=now
+    | spath
+    | eval event_id=coalesce('event.event_id','jsonPayload.event.event_id')
+    | eval target=coalesce('event.target','jsonPayload.event.target')
+    | eval status=coalesce('event.status','jsonPayload.event.status')
+    | eval latency_ms=coalesce('event.latency_ms','jsonPayload.event.latency_ms')
+    | eval http_status=coalesce('event.http_status','jsonPayload.event.http_status')
+    | search labels.env="dev" target="tsgpayments"
+    | table _time event_id target status http_status latency_ms
+    | sort - _time
     ```
-  - Latency by target (p95):
+  - Errors grouped by processor:
     ```
-    index=<your_index> sourcetype=payment_probe source=gcp.payment-probe 
-    | spath 
-    | stats perc95(event.latency_ms) as p95, avg(event.latency_ms) as avg by event.target
+    index=payments earliest=-24h latest=now
+    | spath
+    | eval target=coalesce('event.target','jsonPayload.event.target')
+    | eval status=coalesce('event.status','jsonPayload.event.status')
+    | eval event_id=coalesce('event.event_id','jsonPayload.event.event_id')
+    | search status="ERROR"
+    | stats count AS errors latest(event_id) AS last_event by target
+    | sort - errors
+    ```
+  - Latency health check (p95 > 2s):
+    ```
+    index=payments earliest=-24h latest=now
+    | spath
+    | eval target=coalesce('event.target','jsonPayload.event.target')
+    | eval latency_ms=coalesce('event.latency_ms','jsonPayload.event.latency_ms')
+    | stats perc95(latency_ms) AS p95 avg(latency_ms) AS avg by target
+    | where p95 > 2000
     ```
 - Routing to Splunk (sink/wiring) is out of scope here; use a Logging sink + Pub/Sub + Splunk HEC (or Splunk GCP add‑on). No transformation is needed—forward the envelope as‑is.
 - Terraform stays module-free but relies on small `for_each` loops so you can manage processors in a single map.
