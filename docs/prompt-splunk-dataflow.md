@@ -17,7 +17,7 @@ Add a streaming forwarder from Pub/Sub to Splunk using the Google‑provided Dat
 
 ## Variables to Add (per env variables.tf)
 - `enable_splunk_forwarder` (bool, default `false`)
-- `splunk_hec_url` (string) — e.g., `https://splunk.example.com:8088`
+- `splunk_hec_url` (string) — e.g., `https://splunk.example.com:8088` (must match an FQDN in the HEC certificate SAN; no trailing slash)
 - `splunk_hec_token` (string, sensitive) — HEC token with write privileges
 - `splunk_hec_insecure_ssl` (bool, default `false`) — allow insecure certs (dev only)
 - `splunk_index` (string, default `null`) — optional index override
@@ -28,6 +28,7 @@ Add a streaming forwarder from Pub/Sub to Splunk using the Google‑provided Dat
 - `splunk_batch_interval_sec` (number, default `5`) — flush interval
 - `splunk_max_workers` (number, default `3`) — Dataflow autoscaling cap
 - `splunk_machine_type` (string, default `n1-standard-2`) — Dataflow worker type
+- `splunk_enable_streaming_engine` (bool, default `false`) — enable Dataflow Streaming Engine (forces a new job when toggled)
 - `dataflow_region` (string, default same as project default)
 - `dataflow_staging_bucket` (string) — GCS bucket for staging/temp
 - `pubsub_subscription_name` (string, default `probe-logs-splunk`) — subscription to create on `probe-logs`
