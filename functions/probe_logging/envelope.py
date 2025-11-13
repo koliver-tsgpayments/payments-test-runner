@@ -47,6 +47,13 @@ def _get_tenant() -> str:
     return os.getenv("TENANT", "default")
 
 
+def _get_env() -> str:
+    env = os.getenv("ENV")
+    if env:
+        return env
+    return "local" if not _in_managed_env() else "unknown"
+
+
 def _get_log_name() -> str:
     return os.getenv("LOG_NAME", DEFAULT_LOG_NAME)
 
@@ -113,42 +120,48 @@ def _maybe_init_gcloud_logger(logger: logging.Logger, log_name: str) -> bool:
 
 
 def emit_probe_log(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Build and emit the probe envelope via stdlib or GCL logging.
+    """Build and emit a flat probe envelope via stdlib or GCL logging.
 
     Expects `event` to contain: event_id, function, region, target, status,
     http_status (optional), latency_ms, tenant, severity, extra (dict).
-    Returns the envelope as a plain dict.
+    Returns the envelope as a plain dict ready for ingestion (e.g. BigQuery).
     """
     region = event.get("region") or _get_region()
     function_name = event.get("function") or _get_function_name(event.get("target", "unknown"))
     tenant = event.get("tenant") or _get_tenant()
     host = region if region and region != "unknown" else function_name
+    severity = str(event.get("severity", "INFO"))
+    event_id = event.get("event_id", new_event_id())
+    latency_ms = int(event.get("latency_ms", 0))
+    http_status = event.get("http_status")
+    status = event.get("status")
+    extra = event.get("extra", {}) or {}
+    env_name = event.get("env") or _get_env()
 
     envelope_dict: Dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
         "time": int(time.time()),
+        "event_id": event_id,
+        "function": function_name,
+        "region": region,
+        "env": env_name,
+        "target": event.get("target"),
+        "status": status,
+        "http_status": http_status,
+        "latency_ms": latency_ms,
+        "tenant": tenant,
+        "severity": severity,
+        "extra": extra,
         "host": host,
         "source": DEFAULT_SOURCE,
         "sourcetype": DEFAULT_SOURCETYPE,
-        "event": {
-            "schema_version": SCHEMA_VERSION,
-            "event_id": event.get("event_id", new_event_id()),
-            "function": function_name,
-            "region": region,
-            "target": event.get("target"),
-            "status": event.get("status"),
-            "http_status": event.get("http_status"),
-            "latency_ms": int(event.get("latency_ms", 0)),
-            "tenant": tenant,
-            "severity": event.get("severity", "INFO"),
-            "extra": event.get("extra", {}) or {},
-        },
     }
 
     _set_last_envelope(envelope_dict)
 
     log_name = _get_log_name()
     logger = logging.getLogger(log_name)
-    level = _severity_to_level(str(event.get("severity", "INFO")))
+    level = _severity_to_level(severity)
 
     structured = _maybe_init_gcloud_logger(logger, log_name)
     try:
