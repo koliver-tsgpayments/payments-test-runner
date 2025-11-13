@@ -50,12 +50,6 @@ variable "bq_sink_use_partitioned_tables" {
   default     = true
 }
 
-variable "enable_pubsub_sink" {
-  description = "Enable Log Router sink to Pub/Sub for probe envelopes."
-  type        = bool
-  default     = false
-}
-
 variable "pubsub_topic_name" {
   description = "Pub/Sub topic name for probe logs."
   type        = string
@@ -92,12 +86,6 @@ variable "splunk_hec_token" {
   default     = null
 }
 
-variable "splunk_hec_insecure_ssl" {
-  description = "Allow insecure (self-signed) SSL certificates when posting to Splunk."
-  type        = bool
-  default     = false
-}
-
 variable "splunk_root_ca_gcs_path" {
   description = "Optional Cloud Storage path to a PEM-encoded root certificate for Splunk HEC."
   type        = string
@@ -105,9 +93,9 @@ variable "splunk_root_ca_gcs_path" {
 }
 
 variable "splunk_index" {
-  description = "Optional Splunk index override (null to use HEC defaults)."
+  description = "Splunk index override (defaults to \"payments\")."
   type        = string
-  default     = null
+  default     = "payments"
 }
 
 variable "splunk_source" {
@@ -152,20 +140,8 @@ variable "splunk_machine_type" {
   default     = "n1-standard-2"
 }
 
-variable "splunk_enable_streaming_engine" {
-  description = "Enable Dataflow Streaming Engine for the Splunk forwarder job."
-  type        = bool
-  default     = false
-}
-
 variable "dataflow_region" {
   description = "Region to run the Splunk forwarder Dataflow job (null for default)."
-  type        = string
-  default     = null
-}
-
-variable "dataflow_staging_bucket" {
-  description = "GCS bucket that stores staging/temp artifacts for Dataflow."
   type        = string
   default     = null
 }

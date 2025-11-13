@@ -1,3 +1,13 @@
+variable "environment" {
+  description = "Short environment identifier (e.g., dev, prod)."
+  type        = string
+}
+
+variable "splunk_network_cidr" {
+  description = "CIDR block allocated to the Splunk Dataflow subnetwork."
+  type        = string
+}
+
 variable "project_id" {}
 
 variable "artifact_bucket" {

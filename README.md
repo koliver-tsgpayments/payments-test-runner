@@ -131,11 +131,10 @@ Edit `infra/dev/variables.tfvars` (create it) with:
 project_id      = "payments-test-runner-dev"
 artifact_bucket = "code-releases-payments-dev"
 
-# Optional logging/export toggles (defaults shown)
-# enable_pubsub_sink       = false         # Cloud Logging → Pub/Sub export
-# pubsub_topic_name        = "probe-logs"  # Topic for probe envelopes
-# pubsub_dlq_topic_name    = "probe-logs-dlq" # DLQ topic for future consumers
-# enable_bq_sink           = true          # BigQuery export (Log Router → BQ)
+# Optional logging/export overrides (defaults shown)
+# pubsub_topic_name        = "probe-logs"      # Topic for probe envelopes
+# pubsub_dlq_topic_name    = "probe-logs-dlq"  # DLQ topic for future consumers
+# enable_bq_sink           = true              # BigQuery export (Log Router → BQ)
 
 # Optional ops alerts toggles (defaults shown)
 # enable_ops_alerts                = false
@@ -192,20 +191,18 @@ Cloud Logging → Log Router Sink → Pub/Sub Topic → Subscription(s) → Subs
 
 - The sink is the publisher to Pub/Sub. It does not create subscriptions.
 - Defaults in `infra/dev` and `infra/prod`:
-  - `enable_pubsub_sink = false` → sink disabled (no publish to Pub/Sub)
-  - `enable_bq_sink = true` → BigQuery export remains on by default
+  - The Logging → Pub/Sub sink now always publishes envelopes to `probe-logs`.
+  - `enable_bq_sink = true` keeps the BigQuery export on by default.
   - Topics are created by default and are harmless without subscriptions.
 
-Variables you can toggle in `infra/*/variables.tf` and `.tfvars`:
-- `enable_pubsub_sink` (bool): turn on/off the Logging → Pub/Sub export
+Variables you can still override in `infra/*/variables.tf` and `.tfvars`:
 - `pubsub_topic_name` (string): topic name for probe logs (default `probe-logs`)
 
 #### Test with a temporary subscription
 
-1) Enable the sink in dev and apply:
+1) Apply dev Terraform (the sink now publishes to Pub/Sub by default):
 ```
 cd infra/dev
-# in infra/dev/variables.tfvars set: enable_pubsub_sink = true
 terraform init
 terraform apply -var-file=variables.tfvars
 ```
@@ -243,15 +240,7 @@ gcloud pubsub subscriptions pull probe-logs-tmp --auto-ack
   ```
   gcloud pubsub subscriptions delete probe-logs-tmp --project="$PROJECT"
   ```
-- Optionally disable the sink:
-  - In `infra/dev/variables.tfvars`, set `enable_pubsub_sink = false`
-  - Apply again: `terraform apply -var-file=variables.tfvars`
-  - If you also want to delete the topics, you can target-destroy them:
-    ```
-    terraform destroy -var-file=variables.tfvars \
-      -target=google_pubsub_topic.probe_logs \
-      -target=google_pubsub_topic.probe_logs_dlq
-    ```
+- The sink stays deployed; remove the resource from Terraform if you truly need to turn it off.
 
 Notes:
 - Subscriptions only receive messages published after they are created.
@@ -283,16 +272,15 @@ Inputs the template needs
 - Optional: index, source, sourcetype overrides.
 
 Terraform knobs (per env `variables.tfvars`)
-- `enable_pubsub_sink` — turn on the Log Router → Pub/Sub export (creates the topic publisher).
 - `enable_splunk_forwarder` — creates the subscription, service account, IAM, VPC, and runs the Dataflow template.
 - `splunk_hec_url` / `splunk_hec_token` — required template parameters (URL must match the HEC certificate FQDN, no trailing slash).
-- `dataflow_staging_bucket` — temp/staging bucket for Dataflow artifacts.
-- `splunk_hec_insecure_ssl` (dev only) or `splunk_root_ca_gcs_path` — control TLS validation vs. providing a custom PEM chain.
-- `splunk_index`, `splunk_source`, `splunk_sourcetype` — optional overrides applied per event.
+- `splunk_root_ca_gcs_path` — optional PEM chain if you re-enable TLS validation.
+- `splunk_index`, `splunk_source`, `splunk_sourcetype` — optional overrides applied per event (`splunk_index` defaults to `payments` now).
 - `splunk_batch_count`, `splunk_batch_bytes`, `splunk_batch_interval_sec` — batching controls; defaults are template-friendly.
 - `splunk_max_workers`, `splunk_machine_type`, `dataflow_region` — govern scaling and placement.
-- `splunk_enable_streaming_engine` — toggles Dataflow Streaming Engine (adds a `-se` suffix to the job name to force recreation).
 - `pubsub_subscription_name`, `pubsub_dlq_topic_name` — dedicated subscription/DLQ names for the forwarder.
+
+The Dataflow job reuses the release `artifact_bucket` for staging/temp files, always runs with Streaming Engine enabled, and skips TLS verification because Splunk's current HEC certificate chain is not trusted in this environment (documented inline in the Terraform).
 
 Planned next step
 - See docs/prompt-splunk-dataflow.md for an AI‑ready prompt to wire this with Terraform. We’ll keep it toggleable (disabled by default) and parameterized per environment.
@@ -305,11 +293,10 @@ Create `infra/prod/variables.tfvars`:
 project_id      = "payments-test-runner-prod"
 artifact_bucket = "code-releases-payments-dev" # reading from DEV bucket
 
-# Optional logging/export toggles (defaults shown)
-# enable_pubsub_sink       = false         # Cloud Logging → Pub/Sub export
-# pubsub_topic_name        = "probe-logs"  # Topic for probe envelopes
-# pubsub_dlq_topic_name    = "probe-logs-dlq" # DLQ topic for future consumers
-# enable_bq_sink           = true          # BigQuery export (Log Router → BQ)
+# Optional logging/export overrides (defaults shown)
+# pubsub_topic_name        = "probe-logs"      # Topic for probe envelopes
+# pubsub_dlq_topic_name    = "probe-logs-dlq"  # DLQ topic for future consumers
+# enable_bq_sink           = true              # BigQuery export (Log Router → BQ)
 
 # Optional ops alerts toggles (defaults shown)
 # enable_ops_alerts                = false
