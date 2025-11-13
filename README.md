@@ -273,7 +273,7 @@ Inputs the template needs
 
 Terraform knobs (per env `variables.tfvars`)
 - `enable_splunk_forwarder` — creates the subscription, service account, IAM, VPC, and runs the Dataflow template.
-- `splunk_hec_url` / `splunk_hec_token` — required template parameters (URL must match the HEC certificate FQDN, no trailing slash).
+- `splunk_hec_url` plus either `splunk_hec_token` (direct, not recommended) or `splunk_hec_token_secret_name` (preferred Secret Manager source) — required template parameters.
 - `splunk_root_ca_gcs_path` — optional PEM chain if you re-enable TLS validation.
 - `splunk_index`, `splunk_source`, `splunk_sourcetype` — optional overrides applied per event (`splunk_index` defaults to `payments` now).
 - `splunk_batch_count`, `splunk_batch_bytes`, `splunk_batch_interval_sec` — batching controls; defaults are template-friendly.
@@ -281,6 +281,15 @@ Terraform knobs (per env `variables.tfvars`)
 - `pubsub_subscription_name`, `pubsub_dlq_topic_name` — dedicated subscription/DLQ names for the forwarder.
 
 The Dataflow job reuses the release `artifact_bucket` for staging/temp files, always runs with Streaming Engine enabled, and skips TLS verification because Splunk's current HEC certificate chain is not trusted in this environment (documented inline in the Terraform).
+
+**Secret Manager token**
+- Create a Secret Manager secret (for example `splunk-hec-token`) in the target project and add the HEC token manually. Either use the Console or:
+  ```bash
+  PROJECT=payments-test-runner-dev
+  gcloud secrets create splunk-hec-token --project="$PROJECT" --replication-policy="automatic"
+  printf 'YOUR-TOKEN-HERE' | gcloud secrets versions add splunk-hec-token --project="$PROJECT" --data-file=-
+  ```
+- Set `splunk_hec_token_secret_name = "splunk-hec-token"` in each `infra/*/variables.tfvars`. Terraform reads the latest version at plan/apply time and passes it to Dataflow so the value never lives in source control (it will still exist in Terraform state because the Dataflow template parameter stores it).
 
 Planned next step
 - See docs/prompt-splunk-dataflow.md for an AI‑ready prompt to wire this with Terraform. We’ll keep it toggleable (disabled by default) and parameterized per environment.

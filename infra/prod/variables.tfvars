@@ -16,7 +16,7 @@ functions = {
   }
 }
 
-enable_splunk_forwarder = false
-splunk_hec_url          = "https://prd-p-3wvvs.splunkcloud.com:8088"
-splunk_hec_token        = "92a743fc-339d-4c0b-ac3d-c89bb55a08c7"
-splunk_index = "payments"
+enable_splunk_forwarder      = false
+splunk_hec_url               = "https://prd-p-3wvvs.splunkcloud.com:8088"
+splunk_hec_token_secret_name = "splunk-hec-token"
+splunk_index                 = "payments"

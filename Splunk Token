@@ -1,5 +1,5 @@
 Token Name: payment_probe_test
-Token Value: 92a743fc-339d-4c0b-ac3d-c89bb55a08c7
+Token Value: <Secret>
 Source Type: payment_probe
 Index: main
 Indexer Acknowledgment: Off
@@ -13,7 +13,7 @@ HEC URL	https://prd-p-3wvvs.splunkcloud.com:8088/services/collector
 Port	8088
 
 curl -k https://prd-p-3wvvs.splunkcloud.com:8088/services/collector \
-  -H "Authorization: Splunk 92a743fc-339d-4c0b-ac3d-c89bb55a08c7" \
+  -H "Authorization: Splunk <Token Value>" \
   -H "Content-Type: application/json" \
   -d '{
         "event": {

@@ -86,6 +86,12 @@ variable "splunk_hec_token" {
   default     = null
 }
 
+variable "splunk_hec_token_secret_name" {
+  description = "Optional Secret Manager secret name (in this project) that stores the Splunk HEC token. Set when you prefer not to pass the token directly."
+  type        = string
+  default     = null
+}
+
 variable "splunk_root_ca_gcs_path" {
   description = "Optional Cloud Storage path to a PEM-encoded root certificate for Splunk HEC."
   type        = string

@@ -16,9 +16,19 @@ provider "google" {
   project = var.project_id
 }
 
+data "google_secret_manager_secret_version" "splunk_hec_token" {
+  count   = var.splunk_hec_token_secret_name == null ? 0 : 1
+  project = var.project_id
+  secret  = var.splunk_hec_token_secret_name
+  version = "latest"
+}
+
 locals {
   env                 = "dev"
   splunk_network_cidr = "10.60.0.0/24"
+  splunk_hec_token_value = var.splunk_hec_token != null ? var.splunk_hec_token : (
+    var.splunk_hec_token_secret_name == null ? null : data.google_secret_manager_secret_version.splunk_hec_token[0].secret_data
+  )
 }
 
 module "stack" {
@@ -42,7 +52,7 @@ module "stack" {
   pubsub_dlq_topic_name          = var.pubsub_dlq_topic_name
   pubsub_subscription_name       = var.pubsub_subscription_name
   splunk_hec_url                 = var.splunk_hec_url
-  splunk_hec_token               = var.splunk_hec_token
+  splunk_hec_token               = local.splunk_hec_token_value
   splunk_root_ca_gcs_path        = var.splunk_root_ca_gcs_path
   splunk_index                   = var.splunk_index
   splunk_source                  = var.splunk_source
