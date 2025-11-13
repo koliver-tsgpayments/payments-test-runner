@@ -135,7 +135,7 @@ resource "google_logging_project_sink" "probe_to_bq" {
 
   name        = "probe-to-bq"
   destination = "bigquery.googleapis.com/projects/${var.project_id}/datasets/${var.bq_dataset_id}"
-  filter      = "jsonPayload.source=\"gcp.payment-probe\" AND jsonPayload.event.schema_version=\"v1\""
+  filter      = "jsonPayload.source=\"gcp.payment-probe\" AND jsonPayload.schema_version=\"v1\""
 
   bigquery_options {
     use_partitioned_tables = var.bq_sink_use_partitioned_tables
@@ -166,7 +166,7 @@ resource "google_logging_project_sink" "probe_to_pubsub" {
 
   name        = "probe-to-pubsub"
   destination = "pubsub.googleapis.com/${google_pubsub_topic.probe_logs.id}"
-  filter      = "jsonPayload.source=\"gcp.payment-probe\" AND jsonPayload.event.schema_version=\"v1\""
+  filter      = "jsonPayload.source=\"gcp.payment-probe\" AND jsonPayload.schema_version=\"v1\""
 }
 
 # Grant sink writer identity permission to publish to the topic

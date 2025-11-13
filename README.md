@@ -37,14 +37,14 @@ Artifacts are built by GitHub CI on tag and exposed as downloadable workflow art
   ```
   Example response/log line (envelope):
   ```
-  {"time":1730400000,"host":"local","source":"gcp.payment-probe","sourcetype":"payment_probe","event":{"schema_version":"v1","event_id":"...","function":"run_tsgpayments","region":"local","target":"tsgpayments","status":"OK","http_status":200,"latency_ms":123,"tenant":"default","severity":"INFO","extra":{}}}
+  {"schema_version":"v1","time":1730400000,"event_id":"...","function":"run_tsgpayments","region":"local","env":"local","target":"tsgpayments","status":"OK","http_status":200,"latency_ms":123,"tenant":"default","severity":"INFO","extra":{},"host":"local","source":"gcp.payment-probe","sourcetype":"payment_probe"}
   ```
 - Want to exercise the deployed functions instead? Publish a Pub/Sub message and tail the logs:
   ```
   PROJECT=payments-test-runner-dev
   gcloud pubsub topics publish tsgpayments-topic-us-central1 --message='{"action":"run"}' --project="$PROJECT"
   gcloud logging read \
-    'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.target="tsgpayments"' \
+    'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.source="gcp.payment-probe" AND jsonPayload.target="tsgpayments"' \
     --project="$PROJECT" \
     --limit=5 \
     --format=json
@@ -175,8 +175,8 @@ Each entry in `functions` spins up the supporting Pub/Sub topic(s), Cloud Functi
 Check logs (example: latest `tsgpayments` run in dev):
 ```
 PROJECT=payments-test-runner-dev
-gcloud logging read \
-  'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.target="tsgpayments"' \
+  gcloud logging read \
+    'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.source="gcp.payment-probe" AND jsonPayload.target="tsgpayments"' \
   --project="$PROJECT" \
   --limit=20 \
 --format=json
@@ -255,7 +255,8 @@ gcloud pubsub subscriptions pull probe-logs-tmp --auto-ack
 
 Notes:
 - Subscriptions only receive messages published after they are created.
-- The sink filter is strict: `jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.schema_version="v1"`.
+- The sink filter is strict: `jsonPayload.source="gcp.payment-probe" AND jsonPayload.schema_version="v1"`.
+- Messages delivered to Pub/Sub contain the same flattened envelope (`schema_version`, `target`, `status`, etc. at the top level), so existing Dataflow or Splunk consumers continue to work as long as they reference the new field paths.
 
 ### Streaming to Splunk (Dataflow Template)
 
@@ -367,7 +368,7 @@ You can promote new processors or regions by editing the map—no Terraform code
 Export only probe envelopes to BigQuery via the project-level Log Router.
 
 - Defaults: `bq_dataset_id=payment_probe`, `bq_location=US`, `enable_bq_sink=true`, `bq_table_expiration_days=null`, `bq_sink_use_partitioned_tables=true`.
-- Filter: `jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.schema_version="v1"`.
+- Filter: `jsonPayload.source="gcp.payment-probe" AND jsonPayload.schema_version="v1"`.
 - Toggle: set `enable_bq_sink` in `infra/*/variables.tfvars` (dataset remains if disabled).
 - Note: Most envelopes land in `run_googleapis_com_stderr` (structured logging writes to stderr).
 - More details: see `docs/prompt-bq-sink.md`.
@@ -396,10 +397,10 @@ Query examples (partitioned tables)
 bq query --use_legacy_sql=false --project_id="$PROJECT" '
   SELECT
     timestamp,
-    jsonPayload.event.target AS target,
-    jsonPayload.event.status AS status,
-    jsonPayload.event.http_status AS http_status,
-    jsonPayload.event.latency_ms AS latency_ms,
+    jsonPayload.target AS target,
+    jsonPayload.status AS status,
+    jsonPayload.http_status AS http_status,
+    jsonPayload.latency_ms AS latency_ms,
     jsonPayload.region AS region
   FROM `payment_probe.run_googleapis_com_stderr`
   WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
@@ -428,6 +429,26 @@ bq query --use_legacy_sql=false --project_id="$PROJECT" '
   FROM logs
   WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
     AND jsonPayload.source = "gcp.payment-probe"'
+
+### Probe schema (jsonPayload.*)
+| Field          | Type    | Notes |
+| -------------- | ------- | ----- |
+| `schema_version` | STRING | Envelope schema id (currently `v1`) |
+| `time`         | INT64   | Unix epoch seconds recorded when the log was emitted |
+| `event_id`     | STRING  | UUID per invocation |
+| `function`     | STRING  | Cloud Function entry point (e.g., `run_tsgpayments`) |
+| `region`       | STRING  | Region (or `local` when running locally) |
+| `env`          | STRING  | Deployment environment (`dev`, `prod`, `local`, etc.) |
+| `target`       | STRING  | Logical processor alias (tsgpayments, worldpay, etc.) |
+| `status`       | STRING  | `OK` or `ERROR` |
+| `http_status`  | INT64   | Downstream HTTP status code (if applicable) |
+| `latency_ms`   | INT64   | Total runtime latency in milliseconds |
+| `tenant`       | STRING  | Tenant identifier (defaults to `default`) |
+| `severity`     | STRING  | Log severity chosen by the probe |
+| `extra`        | JSON    | Free-form details (always an object) |
+| `host`         | STRING  | Mirrors region/function for Splunk friendliness |
+| `source`       | STRING  | Fixed `gcp.payment-probe` |
+| `sourcetype`   | STRING  | Fixed `payment_probe` |
 ```
 
 If partitioning is disabled (daily-sharded tables)
@@ -453,23 +474,22 @@ log stream (default name `payment-probe`). The envelope shape is Splunk‑HEC co
 
 ```
 {
+  "schema_version": "v1",
   "time": 1730400000,
+  "event_id": "b4b0c3c4-6c1c-4f0e-9a2e-6b2a7f9b1d90",
+  "function": "run_tsgpayments",
+  "region": "us-central1",
+  "env": "dev",
+  "target": "tsgpayments",
+  "status": "OK",
+  "http_status": 200,
+  "latency_ms": 123,
+  "tenant": "default",
+  "severity": "INFO",
+  "extra": {},
   "host": "us-central1",
   "source": "gcp.payment-probe",
-  "sourcetype": "payment_probe",
-  "event": {
-    "schema_version": "v1",
-    "event_id": "b4b0c3c4-6c1c-4f0e-9a2e-6b2a7f9b1d90",
-    "function": "run_tsgpayments",
-    "region": "us-central1",
-    "target": "tsgpayments",
-    "status": "OK",
-    "http_status": 200,
-    "latency_ms": 123,
-    "tenant": "default",
-    "severity": "INFO",
-    "extra": {}
-  }
+  "sourcetype": "payment_probe"
 }
 ```
 
@@ -477,16 +497,18 @@ Key fields you can filter on:
 - `labels."python_logger"="payment-probe"` (set by `LOG_NAME`; entries land under `run.googleapis.com/stderr`)
 - `jsonPayload.source="gcp.payment-probe"`
 - `jsonPayload.sourcetype="payment_probe"`
-- `jsonPayload.event.target` (e.g., `tsgpayments`, `worldpay`)
-- `jsonPayload.event.status` (`OK` or `ERROR`)
+- `jsonPayload.env` (`dev`, `prod`, `local`, etc.)
+- `jsonPayload.target` (e.g., `tsgpayments`, `worldpay`)
+- `jsonPayload.status` (`OK` or `ERROR`)
 - `severity` (`INFO`, `WARNING`, `ERROR`)
 
 ### Logs Explorer (UI) examples
 - All probe logs (simplest): `jsonPayload.source="gcp.payment-probe"`
 - Only errors: `jsonPayload.source="gcp.payment-probe" severity=ERROR`
-- Per target: `jsonPayload.source="gcp.payment-probe" jsonPayload.event.target="worldpay"`
-- Per function: `jsonPayload.source="gcp.payment-probe" jsonPayload.event.function="run_tsgpayments"`
-- By tenant: `jsonPayload.source="gcp.payment-probe" jsonPayload.event.tenant="default"`
+- Per target: `jsonPayload.source="gcp.payment-probe" jsonPayload.target="worldpay"`
+- Per function: `jsonPayload.source="gcp.payment-probe" jsonPayload.function="run_tsgpayments"`
+- By tenant: `jsonPayload.source="gcp.payment-probe" jsonPayload.tenant="default"`
+- By env: `jsonPayload.source="gcp.payment-probe" jsonPayload.env="dev"`
 
 ### gcloud examples
 ```
@@ -495,14 +517,14 @@ PROJECT=payments-test-runner-dev
 gcloud logging read 'jsonPayload.source="gcp.payment-probe"' --project="$PROJECT" --limit=50 --format=json
 
 # Narrow by target
-gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.target="tsgpayments"' --project="$PROJECT" --limit=50 --format=json
+gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.target="tsgpayments"' --project="$PROJECT" --limit=50 --format=json
 
 # Narrow by function entry point (e.g., run_tsgpayments)
-gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.function="run_tsgpayments"' --project="$PROJECT" --limit=50 --format=json
+gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.function="run_tsgpayments"' --project="$PROJECT" --limit=50 --format=json
 
 # Only errors (two options)
 gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND severity=ERROR' --project="$PROJECT" --limit=50 --format=json
-gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.event.status="ERROR"' --project="$PROJECT" --limit=50 --format=json
+gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.status="ERROR"' --project="$PROJECT" --limit=50 --format=json
 
 # Time range filters
 # Last 1 hour
@@ -513,21 +535,21 @@ gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND timestamp>="2025
   --project="$PROJECT" --format=json
 ```
 
-Note: `event.target` is the logical processor alias (e.g., `tsgpayments`, `worldpay`) and stays stable across regions. `event.function` reflects the function entry point name in the runtime. Use either for scoping; `target` is generally simpler.
+Note: `jsonPayload.target` is the logical processor alias (e.g., `tsgpayments`, `worldpay`) and stays stable across regions. `jsonPayload.function` reflects the function entry point name in the runtime. Use either for scoping; `target` is generally simpler.
 
 ### Splunk notes
-- The envelope matches Splunk HEC’s expected shape (`time`, `host`, `source`, `sourcetype`, `event`).
-- Depending on how Splunk parsed the payload, fields might exist at both `event.*` and `jsonPayload.event.*`. The following pattern runs a single `| spath` and then uses `coalesce()` to grab whichever copy is present.
+- The log body already contains `time`, `host`, `source`, `sourcetype`, and all probe fields at the top level. If you use HEC, wrap this dict as the `event` payload; if you forward Cloud Logging entries directly, the fields usually appear under `jsonPayload.*`.
+- Depending on how Splunk parsed the payload, fields might exist either directly (e.g., `target`) or under `jsonPayload.*`. The following searches run a single `| spath` and then use `coalesce()` to grab whichever copy is present.
 - Recommended Splunk search examples:
   - Latest payment probe (dev → `tsgpayments`, last 24h):
     ```
     index=payments earliest=-24h latest=now
     | spath
-    | eval event_id=coalesce('event.event_id','jsonPayload.event.event_id')
-    | eval target=coalesce('event.target','jsonPayload.event.target')
-    | eval status=coalesce('event.status','jsonPayload.event.status')
-    | eval latency_ms=coalesce('event.latency_ms','jsonPayload.event.latency_ms')
-    | eval http_status=coalesce('event.http_status','jsonPayload.event.http_status')
+    | eval event_id=coalesce('event_id','jsonPayload.event_id')
+    | eval target=coalesce('target','jsonPayload.target')
+    | eval status=coalesce('status','jsonPayload.status')
+    | eval latency_ms=coalesce('latency_ms','jsonPayload.latency_ms')
+    | eval http_status=coalesce('http_status','jsonPayload.http_status')
     | search labels.env="dev" target="tsgpayments"
     | table _time event_id target status http_status latency_ms
     | sort - _time
@@ -536,9 +558,9 @@ Note: `event.target` is the logical processor alias (e.g., `tsgpayments`, `world
     ```
     index=payments earliest=-24h latest=now
     | spath
-    | eval target=coalesce('event.target','jsonPayload.event.target')
-    | eval status=coalesce('event.status','jsonPayload.event.status')
-    | eval event_id=coalesce('event.event_id','jsonPayload.event.event_id')
+    | eval target=coalesce('target','jsonPayload.target')
+    | eval status=coalesce('status','jsonPayload.status')
+    | eval event_id=coalesce('event_id','jsonPayload.event_id')
     | search status="ERROR"
     | stats count AS errors latest(event_id) AS last_event by target
     | sort - errors
@@ -547,8 +569,8 @@ Note: `event.target` is the logical processor alias (e.g., `tsgpayments`, `world
     ```
     index=payments earliest=-24h latest=now
     | spath
-    | eval target=coalesce('event.target','jsonPayload.event.target')
-    | eval latency_ms=coalesce('event.latency_ms','jsonPayload.event.latency_ms')
+    | eval target=coalesce('target','jsonPayload.target')
+    | eval latency_ms=coalesce('latency_ms','jsonPayload.latency_ms')
     | stats perc95(latency_ms) AS p95 avg(latency_ms) AS avg by target
     | where p95 > 2000
     ```
