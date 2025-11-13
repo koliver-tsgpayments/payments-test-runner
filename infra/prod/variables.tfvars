@@ -16,7 +16,7 @@ functions = {
   }
 }
 
-enable_splunk_forwarder      = false
+enable_splunk_forwarder      = true
 splunk_hec_url               = "https://prd-p-3wvvs.splunkcloud.com:8088"
 splunk_hec_token_secret_name = "splunk-hec-token"
 splunk_index                 = "payments"
