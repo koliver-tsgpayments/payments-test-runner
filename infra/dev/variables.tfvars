@@ -16,11 +16,7 @@ functions = {
   }
 }
 
-enable_pubsub_sink              = true
-enable_splunk_forwarder         = true
-splunk_hec_url                  = "https://prd-p-3wvvs.splunkcloud.com:8088"
-splunk_hec_token                = "92a743fc-339d-4c0b-ac3d-c89bb55a08c7"
-splunk_hec_insecure_ssl         = true
-splunk_enable_streaming_engine  = true
-dataflow_staging_bucket         = "code-releases-payments-dev"
-splunk_index                    = "payments"
+enable_splunk_forwarder = true
+splunk_hec_url          = "https://prd-p-3wvvs.splunkcloud.com:8088"
+splunk_hec_token        = "92a743fc-339d-4c0b-ac3d-c89bb55a08c7"
+splunk_index            = "payments"
