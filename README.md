@@ -1,149 +1,155 @@
 # Payment Test Runner (GCP Cloud Functions + Terraform)
 
-Small, explicit demo: Python Cloud Functions scheduled by Cloud Scheduler via Pub/Sub. 
-Artifacts are built by GitHub CI on tag and exposed as downloadable workflow artifacts; you upload them to a **dev project** GCS bucket. Terraform is run locally; state lives in GCS for dev and prod.
+An opinionated reference for scheduling HTTP probes via Cloud Functions (Python 3.12) on GCP. GitHub Actions builds tagged function artifacts, Terraform deploys them to dev/prod, and structured logs flow to Cloud Logging, BigQuery, Pub/Sub, and Splunk-ready outputs.
 
-## What you get
-- Two processors:
-  - `tsgpayments` → GET https://tsgpayments.com/ (dev: 15m, prod: 5m)
-  - `worldpay` → GET https://worldpay.com/en (dev: 15m, prod: 5m)
-- **Dev**: one region (`us-central1` by default)
-- **Prod**: three regions (`us-central1`, `us-east4`, `southamerica-east1`). 
-  - A commented South America region for `worldpay` shows how to add/remove regions.
-- Structured probe envelope logs with stable fields (Splunk‑friendly).
-
-> Note on regions: as of Oct 29, 2025, GCP has **no GA Mexico region**. Closest LATAM regions are São Paulo (`southamerica-east1`) and Santiago (`southamerica-west1`).
+## Overview
+- Processors (`tsgpayments`, `worldpay`) run on cron-driven Cloud Functions (CF 2nd gen) via Scheduler → Pub/Sub triggers; each simply issues a public HTTP GET to the vendor site today so you can see the pattern end-to-end before swapping in real payment processors.
+- Multi-region: dev targets one region, prod fans out to multiple (e.g., `us-central1`, `us-east4`, `southamerica-east1`).
+- Infrastructure-as-code end to end: bootstrap, dev, and prod stacks share Terraform state in GCS buckets.
+- Logging is a first-class feature: every invocation emits the same JSON envelope, ready for Cloud Logging filters, BigQuery queries, Pub/Sub subscribers, Splunk/Dataflow, and future third-party sinks.
+- Promotion is artifact-driven: build once on a tag, promote by pointing Terraform at the desired zip.
 
 ---
 
-## 0) Local prerequisites
-- Terraform >= 1.6
-- gcloud CLI
-- Python 3.12 (Cloud Functions runtime; install locally only if you want to build/test yourself)
-- pytest (optional; run unit tests locally the same way CI does)
-
-## 1) Local testing
-- Start the lightweight HTTP shim (returns the structured envelope JSON and also emits it to logs):
-  ```
-  pip install -r functions/requirements.txt
-  python -m functions.local_server
-  ```
-  The server listens on `http://0.0.0.0:8080` by default (override with `LOCAL_SERVER_PORT`).
-  The HTTP response is the structured envelope; it’s also printed to the console.
-  Hit it with curl or Postman:
-  ```
-  curl -X POST http://localhost:8080/tsg | jq
-  curl -X POST http://localhost:8080/worldpay | jq
-  ```
-  Example response/log line (envelope):
-  ```
-  {"schema_version":"v1","time":1730400000,"event_id":"...","function":"run_tsgpayments","region":"local","env":"local","target":"tsgpayments","status":"OK","http_status":200,"latency_ms":123,"tenant":"default","severity":"INFO","extra":{},"host":"local","source":"gcp.payment-probe","sourcetype":"payment_probe"}
-  ```
-- Want to exercise the deployed functions instead? Publish a Pub/Sub message and tail the logs:
-  ```
-  PROJECT=payments-test-runner-dev
-  gcloud pubsub topics publish tsgpayments-topic-us-central1 --message='{"action":"run"}' --project="$PROJECT"
-  gcloud logging read \
-    'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.source="gcp.payment-probe" AND jsonPayload.target="tsgpayments"' \
-    --project="$PROJECT" \
-    --limit=5 \
-    --format=json
-  ```
-- Run unit tests locally (mirrors CI):
-  ```
-  python -m pip install --upgrade pip
-  pip install -r functions/requirements.txt pytest
-  PYTHONPATH=. pytest
-  ```
-
-## 2) Bootstrap with Terraform (once)
-Run the bootstrap stack to enable APIs, create Terraform state buckets, provision the shared release bucket, and configure Workload Identity Federation for GitHub Actions.
-
-**Make sure you already have two GCP projects ready** (for example `payments-test-runner-dev` and `payments-test-runner-prod`). Terraform does not create projects, and billing must be enabled on each project so the required APIs can be turned on.
-
-Create `infra/bootstrap/terraform.tfvars`:
-```hcl
-dev_project_id  = "payments-test-runner-dev"
-prod_project_id = "payments-test-runner-prod"
-github_repository = "your-org/your-repo" # owner/repo for GitHub Actions OIDC
-# Optional overrides:
-# release_bucket_name      = "code-releases-payments-dev"
-# state_bucket_location    = "us-central1"
-# release_bucket_location  = "us-central1"
-# dev_state_bucket_name    = "tfstate-payments-test-runner-dev"
-# prod_state_bucket_name   = "tfstate-payments-test-runner-prod"
+## Architecture Overview
+```
+GitHub Tag → GitHub Actions → GCS release bucket
+                                     │
+                                     ▼
+Cloud Scheduler → Pub/Sub (per processor) → Cloud Functions (Python) → Cloud Logging (structured logs)
+                                                                     │
+                                                                     ├─ Log Router sink → BigQuery dataset (partitioned)
+                                                                     └─ Log Router sink → Pub/Sub topic (`probe-logs`)
+                                                                                         └─ Subscribers (Dataflow → Splunk, future integrations)
 ```
 
-Then run:
-```
-cd infra/bootstrap
-terraform init
-terraform apply -var-file=terraform.tfvars
-```
-
-Terraform will:
-- Enable required APIs in dev and prod (`cloudfunctions`, `eventarc`, `run`, `pubsub`, `cloudscheduler`, `logging`, `cloudbuild`, `storage`).
-- Create versioned Terraform state buckets (`tfstate-payments-test-runner-dev`, `tfstate-payments-test-runner-prod`) consumed by the dev/prod stacks.
-- Create the release bucket (`code-releases-payments-dev`) in the dev project.
-- Grant each project's Cloud Build service account `roles/storage.objectViewer` on the release bucket so Cloud Build can fetch artifacts.
-- Create a GitHub-release service account with `roles/storage.objectCreator` on the release bucket.
-- Configure a Workload Identity Pool + Provider restricted to your repository so GitHub Actions can impersonate the service account.
-
-After the apply, grab the outputs and load them into GitHub secrets:
-```
-terraform output -raw release_bucket
-terraform output -raw gcp_releaser_service_account
-terraform output -raw gcp_workload_identity_provider
-```
-
-Set these secrets in your GitHub repo:
-- `GCS_RELEASE_BUCKET_DEV` → value from `release_bucket`
-- `GCP_RELEASER_SA_DEV` → value from `gcp_releaser_service_account`
-- `GCP_WIF_PROVIDER_DEV` → value from `gcp_workload_identity_provider`
+### Flow
+1. Developer pushes a tag (e.g., `v1.0.0`). GitHub Actions runs `pytest`, builds processor zips, and drops them in the dev release bucket (`gs://code-releases-payments-dev/releases/`).
+2. Terraform (run locally) deploys Cloud Functions, Pub/Sub topics, and Cloud Scheduler jobs per environment using the artifact references.
+3. Each invocation logs a structured probe envelope. The Log Router exports envelopes to BigQuery and Pub/Sub by default; Pub/Sub subscribers feed Splunk or any downstream analytics stack.
 
 ---
 
-## 3) GitHub Flow: build & publish artifacts
-CI builds on **tag** (e.g. `v1.0.0`), produces both function zips, and uploads them directly to the release bucket (`gs://code-releases-payments-dev/releases/`).
+## Local Development & Testing
+### Prerequisites
+- Terraform ≥ 1.6
+- `gcloud` CLI authenticated to the target projects
+- Python 3.12 (matches the Cloud Functions runtime)
+- `pip`, `pytest`, and `jq` (optional but handy for local inspection)
 
-The workflow also publishes an artifact bundle you can download for reference:
-```
-dist/tsg-v1.0.0.zip
-dist/worldpay-v1.0.0.zip
+### Quickstart: run the shim locally
+1. Install dependencies and start the lightweight HTTP server:
+   ```bash
+   pip install -r functions/requirements.txt
+   python -m functions.local_server
+   ```
+2. Invoke processors locally:
+   ```bash
+   curl -X POST http://localhost:8080/tsg | jq
+   curl -X POST http://localhost:8080/worldpay | jq
+   ```
+   The response and stdout both contain the structured envelope; override the port with `LOCAL_SERVER_PORT`.
+3. Inspect the envelope (truncated):
+   ```json
+   {"schema_version":"v1","time":1730400000,"event_id":"...","function":"run_tsgpayments","region":"local","env":"local","target":"tsgpayments","status":"OK","http_status":200,"latency_ms":123,"tenant":"default","severity":"INFO","extra":{},"host":"local","source":"gcp.payment-probe","sourcetype":"payment_probe"}
+   ```
+
+### Talk to deployed processors
+Publish to the deployed Pub/Sub topic and tail logs:
+```bash
+PROJECT=payments-test-runner-dev
+ gcloud pubsub topics publish tsgpayments-topic-us-central1 --message='{"action":"run"}' --project="$PROJECT"
+ gcloud logging read \
+   'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.source="gcp.payment-probe" AND jsonPayload.target="tsgpayments"' \
+   --project="$PROJECT" \
+   --limit=5 \
+   --format=json
 ```
 
-Push a tag to kick off the workflow:
-```
-git tag v1.0.0 && git push origin v1.0.0
+### Run the unit test suite (mirrors CI)
+```bash
+python -m pip install --upgrade pip
+pip install -r functions/requirements.txt pytest
+PYTHONPATH=. pytest
 ```
 
-When the workflow finishes you should see:
-- Release bucket objects (`gs://code-releases-payments-dev/releases/tsg-v1.0.0.zip`, `worldpay-v1.0.0.zip`)
-- Optional GitHub artifact download (`function-zips-v1.0.0`) if you want to inspect the zips locally
-
-The workflow runs `pytest` before building artifacts to prevent broken processors from shipping.
+### Troubleshooting cheat sheet
+| Symptom | Fix |
+| --- | --- |
+| Local server port already in use | `LOCAL_SERVER_PORT=9090 python -m functions.local_server` |
+| Missing deps / mismatched runtime | Ensure Python 3.12 and rerun `pip install -r functions/requirements.txt` |
+| Pub/Sub publish fails | Confirm `PROJECT` env matches the deployed stack and you have `pubsub.publisher` creds |
+| Terraform init cannot find state bucket | Run the bootstrap stack first to create the GCS buckets |
 
 ---
 
-## 4) Terraform: DEV
-Edit `infra/dev/variables.tfvars` (create it) with:
+## Adding a processor (new Cloud Function)
+1. **Implement the processor** under `functions/` (e.g., `functions/processor_foo.py`). Use the existing probes as reference and emit the structured log envelope via the provided logging helper.
+2. **Test locally:** add/extend pytest cases under `tests/`, run `PYTHONPATH=. pytest`, and invoke via the local server.
+3. **Package via CI:** once merged, tag a version so GitHub Actions produces `releases/<processor>-<tag>.zip` in the dev release bucket. You can also build locally if required, but Terraform expects the artifact in GCS.
+4. **Wire Terraform:** edit `infra/dev/variables.tfvars` (and later prod) to add an entry in the `functions` map:
+   ```hcl
+   functions = {
+     foo = {
+       artifact_object = "releases/foo-v1.2.3.zip"
+       entry_point     = "run_foo"
+       regions         = ["us-central1"]
+       schedule        = "*/5 * * * *" # cron expression
+     }
+     # existing processors ...
+   }
+   ```
+   Applying Terraform spins up the Pub/Sub topic(s), Cloud Functions, and Scheduler jobs automatically for each region.
+
+---
+
+## Release flow (GitHub Actions + artifacts)
+- Pipelines trigger on git tags (`v*`). CI runs `pytest`, builds both processor zips, and uploads them to ``.
+- Workflow artifacts named `function-zips-<tag>.zip` remain downloadable from the GitHub UI for manual inspection.
+- Promote a build by referencing the new artifact path in the `functions` map and re-running Terraform; no rebuild is required for prod.
+
+---
+
+## Infrastructure with Terraform
+### Stack summary
+| Stack | Purpose | State bucket | Key outputs |
+| --- | --- | --- | --- |
+| `infra/bootstrap` | One-time APIs, Terraform state buckets, release bucket, GitHub OIDC wiring | `tfstate-payments-test-runner-{dev,prod}` | Release bucket name, GitHub Workload Identity provider + service account |
+| `infra/dev` | Dev Cloud Functions, Pub/Sub, Scheduler, log sinks | `tfstate-payments-test-runner-dev` | Function URLs (if HTTP), log sink IDs, BigQuery dataset/table ids |
+| `infra/prod` | Production deployment (multi-region, shared artifact bucket) | `tfstate-payments-test-runner-prod` | Same as dev with prod project ids |
+
+### Bootstrap once
+1. Create two GCP projects (billing enabled), e.g., `payments-test-runner-dev` and `payments-test-runner-prod`.
+2. Edit `infra/bootstrap/variables.tfvars` (checked into git) with your project IDs and repo:
+   ```hcl
+   dev_project_id   = "payments-test-runner-dev"
+   prod_project_id  = "payments-test-runner-prod"
+   github_repository = "your-org/your-repo" # for GitHub Actions OIDC
+   # Optional overrides for bucket names/locations
+   ```
+3. Apply:
+   ```bash
+   cd infra/bootstrap
+   terraform init
+   terraform apply -var-file=variables.tfvars
+   ```
+4. Capture outputs and set GitHub secrets:
+   ```bash
+   terraform output -raw release_bucket
+   terraform output -raw gcp_releaser_service_account
+   terraform output -raw gcp_workload_identity_provider
+   ```
+   | GitHub secret | Value |
+   | --- | --- |
+   | `GCS_RELEASE_BUCKET_DEV` | `release_bucket` |
+   | `GCP_RELEASER_SA_DEV` | `gcp_releaser_service_account` |
+   | `GCP_WIF_PROVIDER_DEV` | `gcp_workload_identity_provider` |
+
+### Deploy dev
+`infra/dev/variables.tfvars` (create it):
 ```hcl
 project_id      = "payments-test-runner-dev"
 artifact_bucket = "code-releases-payments-dev"
-
-# Optional logging/export overrides (defaults shown)
-# pubsub_topic_name        = "probe-logs"      # Topic for probe envelopes
-# pubsub_dlq_topic_name    = "probe-logs-dlq"  # DLQ topic for future consumers
-# enable_bq_sink           = true              # BigQuery export (Log Router → BQ)
-
-# Optional ops alerts toggles (defaults shown)
-# enable_ops_alerts                = false
-# monitoring_notification_channels = ["projects/$PROJECT/notificationChannels/<ID>"]
-# probe_error_threshold            = 5
-# probe_error_window_sec           = 300
-# enable_pubsub_backlog_alert      = false
-# pubsub_alert_subscription_name   = "probe-logs-splunk"   # when Dataflow is added
-# pubsub_backlog_window_sec        = 600
 
 functions = {
   tsgpayments = {
@@ -159,162 +165,26 @@ functions = {
     schedule        = "*/15 * * * *"
   }
 }
-```
 
-Then:
+# Splunk forwarding (optional, example shown enabled for dev)
+enable_splunk_forwarder      = true
+splunk_hec_url               = "https://prd-p-3wvvs.splunkcloud.com:8088"
+splunk_hec_token_secret_name = "splunk-hec-token"
+splunk_index                 = "payments"
 ```
+Apply:
+```bash
 cd infra/dev
 terraform init
 terraform plan -var-file=variables.tfvars
 terraform apply -var-file=variables.tfvars
 ```
 
-Each entry in `functions` spins up the supporting Pub/Sub topic(s), Cloud Functions, and Cloud Scheduler jobs for the listed regions. Adjust the cron expression per processor and add/remove regions as needed.
-
-Check logs (example: latest `tsgpayments` run in dev):
-```
-PROJECT=payments-test-runner-dev
-  gcloud logging read \
-    'resource.type="cloud_run_revision" AND resource.labels.service_name="tsgpayments-us-central1" AND jsonPayload.source="gcp.payment-probe" AND jsonPayload.target="tsgpayments"' \
-  --project="$PROJECT" \
-  --limit=20 \
---format=json
-```
-
-### Realtime export to Pub/Sub (Log Router)
-
-This repo supports exporting probe envelopes from Cloud Logging to Pub/Sub via a Log Router sink. Flow:
-
-```
-Cloud Logging → Log Router Sink → Pub/Sub Topic → Subscription(s) → Subscriber(s)
-```
-
-- The sink is the publisher to Pub/Sub. It does not create subscriptions.
-- Defaults in `infra/dev` and `infra/prod`:
-  - The Logging → Pub/Sub sink now always publishes envelopes to `probe-logs`.
-  - `enable_bq_sink = true` keeps the BigQuery export on by default.
-  - Topics are created by default and are harmless without subscriptions.
-
-Variables you can still override in `infra/*/variables.tf` and `.tfvars`:
-- `pubsub_topic_name` (string): topic name for probe logs (default `probe-logs`)
-
-#### Test with a temporary subscription
-
-1) Apply dev Terraform (the sink now publishes to Pub/Sub by default):
-```
-cd infra/dev
-terraform init
-terraform apply -var-file=variables.tfvars
-```
-
-2) Create a temporary subscription that auto-expires (24h):
-```
-PROJECT=payments-test-runner-dev
-gcloud pubsub subscriptions create probe-logs-tmp \
-  --topic=probe-logs \
-  --expiration-period=24h \
-  --project="$PROJECT"
-```
-
-3) Trigger a probe run to generate logs (which the sink publishes to Pub/Sub):
-```
-gcloud pubsub topics publish tsgpayments-topic-us-central1 \
-  --message='{"action":"run"}' \
-  --project="$PROJECT"
-```
-
-4) Pull a few messages:
-```
-gcloud pubsub subscriptions pull --auto-ack probe-logs-tmp \
-  --project="$PROJECT" \
-  --limit=5
-```
-
-Quick realtime pull (rerun to see new messages):
-```
-gcloud pubsub subscriptions pull probe-logs-tmp --auto-ack
-```
-
-5) Cleanup:
-- If you didn’t set `--expiration-period`, delete the temp sub:
-  ```
-  gcloud pubsub subscriptions delete probe-logs-tmp --project="$PROJECT"
-  ```
-- The sink stays deployed; remove the resource from Terraform if you truly need to turn it off.
-
-Notes:
-- Subscriptions only receive messages published after they are created.
-- The sink filter is strict: `jsonPayload.source="gcp.payment-probe" AND jsonPayload.schema_version="v1"`.
-- Messages delivered to Pub/Sub contain the same flattened envelope (`schema_version`, `target`, `status`, etc. at the top level), so existing Dataflow or Splunk consumers continue to work as long as they reference the new field paths.
-
-### Streaming to Splunk (Dataflow Template)
-
-Recommended production path to Splunk uses the Google‑provided Dataflow template. High‑level flow:
-
-```
-Cloud Logging → Log Router Sink → Pub/Sub Topic → Subscription → Dataflow (Pub/Sub → Splunk) → Splunk HEC
-```
-
-Why this path
-- Auto‑scales for bursts; Pub/Sub buffers; Dataflow handles backoff/retries.
-- DLQ patterns supported via a dead‑letter topic for failed HEC deliveries.
-- Minimal Splunk footprint; send JSON envelopes directly to HEC.
-
-What you’ll provision (later, via Terraform)
-- A dedicated subscription on `probe-logs` for Dataflow (e.g., `probe-logs-splunk`).
-- A Dataflow streaming job using the “Cloud Pub/Sub to Splunk” template.
-- A worker service account with required roles: `pubsub.subscriber` on the sub, `dataflow.worker`, `storage.objectAdmin` on a staging bucket; `compute.networkUser` if using VPC/NAT.
-- Optional: a DLQ topic (you can reuse `probe-logs-dlq`).
-
-Inputs the template needs
-- Splunk HEC URL (https) and HEC token.
-- Batch size/bytes/interval, max workers, optional gzip.
-- Optional: index, source, sourcetype overrides.
-
-Terraform knobs (per env `variables.tfvars`)
-- `enable_splunk_forwarder` — creates the subscription, service account, IAM, VPC, and runs the Dataflow template.
-- `splunk_hec_url` plus either `splunk_hec_token` (direct, not recommended) or `splunk_hec_token_secret_name` (preferred Secret Manager source) — required template parameters.
-- `splunk_root_ca_gcs_path` — optional PEM chain if you re-enable TLS validation.
-- `splunk_index`, `splunk_source`, `splunk_sourcetype` — optional overrides applied per event (`splunk_index` defaults to `payments` now).
-- `splunk_batch_count`, `splunk_batch_bytes`, `splunk_batch_interval_sec` — batching controls; defaults are template-friendly.
-- `splunk_max_workers`, `splunk_machine_type`, `dataflow_region` — govern scaling and placement.
-- `pubsub_subscription_name`, `pubsub_dlq_topic_name` — dedicated subscription/DLQ names for the forwarder.
-
-The Dataflow job reuses the release `artifact_bucket` for staging/temp files, always runs with Streaming Engine enabled, and skips TLS verification because Splunk's current HEC certificate chain is not trusted in this environment (documented inline in the Terraform).
-
-**Secret Manager token**
-- Create a Secret Manager secret (for example `splunk-hec-token`) in the target project and add the HEC token manually. Either use the Console or:
-  ```bash
-  PROJECT=payments-test-runner-dev
-  gcloud secrets create splunk-hec-token --project="$PROJECT" --replication-policy="automatic"
-  printf 'YOUR-TOKEN-HERE' | gcloud secrets versions add splunk-hec-token --project="$PROJECT" --data-file=-
-  ```
-- Set `splunk_hec_token_secret_name = "splunk-hec-token"` in each `infra/*/variables.tfvars`. Terraform reads the latest version at plan/apply time and passes it to Dataflow so the value never lives in source control (it will still exist in Terraform state because the Dataflow template parameter stores it).
-
-Planned next step
-- See docs/prompt-splunk-dataflow.md for an AI‑ready prompt to wire this with Terraform. We’ll keep it toggleable (disabled by default) and parameterized per environment.
-
----
-
-## 5) Terraform: PROD
-Create `infra/prod/variables.tfvars`:
+### Deploy prod
+`infra/prod/variables.tfvars` mirrors dev but references the prod project and preferred regions:
 ```hcl
 project_id      = "payments-test-runner-prod"
-artifact_bucket = "code-releases-payments-dev" # reading from DEV bucket
-
-# Optional logging/export overrides (defaults shown)
-# pubsub_topic_name        = "probe-logs"      # Topic for probe envelopes
-# pubsub_dlq_topic_name    = "probe-logs-dlq"  # DLQ topic for future consumers
-# enable_bq_sink           = true              # BigQuery export (Log Router → BQ)
-
-# Optional ops alerts toggles (defaults shown)
-# enable_ops_alerts                = false
-# monitoring_notification_channels = ["projects/$PROJECT/notificationChannels/<ID>"]
-# probe_error_threshold            = 5
-# probe_error_window_sec           = 300
-# enable_pubsub_backlog_alert      = false
-# pubsub_alert_subscription_name   = "probe-logs-splunk"   # when Dataflow is added
-# pubsub_backlog_window_sec        = 600
+artifact_bucket = "code-releases-payments-dev" # reuse dev release bucket
 
 functions = {
   tsgpayments = {
@@ -330,145 +200,27 @@ functions = {
     schedule        = "*/10 * * * *"
   }
 }
-```
 
-Then:
+# Splunk forwarding (optional; prod usually mirrors dev once validated)
+enable_splunk_forwarder      = true
+splunk_hec_url               = "https://prd-p-3wvvs.splunkcloud.com:8088"
+splunk_hec_token_secret_name = "splunk-hec-token"
+splunk_index                 = "payments"
 ```
-cd infra/prod
-terraform init
-terraform plan -var-file=variables.tfvars
-terraform apply -var-file=variables.tfvars
-```
+Apply with the same `terraform init/plan/apply` flow.
 
-You can promote new processors or regions by editing the map—no Terraform code changes required. Schedulers inherit the cron value defined per processor.
+### Promotion model
+- CI always uploads artifacts to the dev bucket.
+- Dev stack pins whichever tag you wish to test.
+- Prod stack promotes by pointing to the same artifact (no rebuild). Rollbacks are just pointer changes in `variables.tfvars`.
 
 ---
 
-## 6) Promotion model
-- CI always builds the artifact bundle for the tag and publishes it to the **dev bucket**.
-- DEV stack pins whichever tag you want to test.
-- PROD stack **promotes** by referencing the *same tag* (no rebuild). Rollback by pointing back to a prior tag.
+## Observability & Logging (first-class citizens)
+Logs are emitted once per invocation using a stable schema so every downstream consumer can rely on identical fields.
 
----
-
-## Notes
-- We use **CF 2nd gen** + **Pub/Sub** triggers + **Cloud Scheduler** (no HTTP auth path).
-- Cloud Functions run on Python 3.12; keep the runtime consistent when pinning dependencies or building artifacts locally.
-- Logs use a structured envelope (via Google Cloud StructuredLogHandler when available),
-  making them easy to filter in Cloud Logging and ready for Splunk ingestion.
-
----
-
-## BigQuery Export (Log Router)
-
-Export only probe envelopes to BigQuery via the project-level Log Router.
-
-- Defaults: `bq_dataset_id=payment_probe`, `bq_location=US`, `enable_bq_sink=true`, `bq_table_expiration_days=null`, `bq_sink_use_partitioned_tables=true`.
-- Filter: `jsonPayload.source="gcp.payment-probe" AND jsonPayload.schema_version="v1"`.
-- Toggle: set `enable_bq_sink` in `infra/*/variables.tfvars` (dataset remains if disabled).
-- Note: Most envelopes land in `run_googleapis_com_stderr` (structured logging writes to stderr).
-- More details: see `docs/prompt-bq-sink.md`.
-
-Plan/apply (dev example)
-```
-cd infra/dev
-terraform init
-terraform plan -var-file=variables.tfvars
-terraform apply -var-file=variables.tfvars
-```
-
-Trigger and verify
-```
-PROJECT=payments-test-runner-dev
-gcloud pubsub topics publish tsgpayments-topic-us-central1 --message='{"action":"run"}' --project="$PROJECT"
-gcloud logging sinks list --project="$PROJECT"
-bq ls --project_id "$PROJECT" ${PROJECT}:$(terraform output -raw bq_dataset_id 2>/dev/null || echo payment_probe)
-# Head the partitioned stderr table (most common)
-bq head --project_id "$PROJECT" -n 5 payment_probe.run_googleapis_com_stderr
-```
-
-Query examples (partitioned tables)
-```
-# Last 20 envelopes (stderr), newest first
-bq query --use_legacy_sql=false --project_id="$PROJECT" '
-  SELECT
-    timestamp,
-    jsonPayload.target AS target,
-    jsonPayload.status AS status,
-    jsonPayload.http_status AS http_status,
-    jsonPayload.latency_ms AS latency_ms,
-    jsonPayload.region AS region
-  FROM `payment_probe.run_googleapis_com_stderr`
-  WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
-    AND jsonPayload.source = "gcp.payment-probe"
-  ORDER BY timestamp DESC
-  LIMIT 20'
-
-# Count last hour (stderr)
-bq query --use_legacy_sql=false --project_id="$PROJECT" '
-  SELECT COUNT(1)
-  FROM `payment_probe.run_googleapis_com_stderr`
-  WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
-    AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
-    AND jsonPayload.source = "gcp.payment-probe"'
-
-# Across both streams (if stdout also exists)
-bq query --use_legacy_sql=false --project_id="$PROJECT" '
-  WITH logs AS (
-    SELECT timestamp, jsonPayload FROM `payment_probe.run_googleapis_com_stderr`
-    WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
-    UNION ALL
-    SELECT timestamp, jsonPayload FROM `payment_probe.run_googleapis_com_stdout`
-    WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
-  )
-  SELECT COUNT(1)
-  FROM logs
-  WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
-    AND jsonPayload.source = "gcp.payment-probe"'
-
-### Probe schema (jsonPayload.*)
-| Field          | Type    | Notes |
-| -------------- | ------- | ----- |
-| `schema_version` | STRING | Envelope schema id (currently `v1`) |
-| `time`         | INT64   | Unix epoch seconds recorded when the log was emitted |
-| `event_id`     | STRING  | UUID per invocation |
-| `function`     | STRING  | Cloud Function entry point (e.g., `run_tsgpayments`) |
-| `region`       | STRING  | Region (or `local` when running locally) |
-| `env`          | STRING  | Deployment environment (`dev`, `prod`, `local`, etc.) |
-| `target`       | STRING  | Logical processor alias (tsgpayments, worldpay, etc.) |
-| `status`       | STRING  | `OK` or `ERROR` |
-| `http_status`  | INT64   | Downstream HTTP status code (if applicable) |
-| `latency_ms`   | INT64   | Total runtime latency in milliseconds |
-| `tenant`       | STRING  | Tenant identifier (defaults to `default`) |
-| `severity`     | STRING  | Log severity chosen by the probe |
-| `extra`        | JSON    | Free-form details (always an object) |
-| `host`         | STRING  | Mirrors region/function for Splunk friendliness |
-| `source`       | STRING  | Fixed `gcp.payment-probe` |
-| `sourcetype`   | STRING  | Fixed `payment_probe` |
-```
-
-If partitioning is disabled (daily-sharded tables)
-```
-# Count last day across shards
-bq query --use_legacy_sql=false --project_id="$PROJECT" '
-  SELECT COUNT(1)
-  FROM `payment_probe.run_googleapis_com_stderr_*`
-  WHERE _TABLE_SUFFIX >= FORMAT_DATE("%Y%m%d", DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
-    AND jsonPayload.source = "gcp.payment-probe"'
-```
-
-Reusing an existing dataset
-```
-terraform import google_bigquery_dataset.probe projects/$PROJECT/datasets/$DATASET_ID
-```
-
-
-## Viewing Logs (Cloud Logging + Splunk)
-
-All processors emit exactly one structured JSON envelope per invocation to a dedicated
-log stream (default name `payment-probe`). The envelope shape is Splunk‑HEC compatible:
-
-```
+### Structured envelope
+```json
 {
   "schema_version": "v1",
   "time": 1730400000,
@@ -488,87 +240,162 @@ log stream (default name `payment-probe`). The envelope shape is Splunk‑HEC co
   "sourcetype": "payment_probe"
 }
 ```
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema_version` | STRING | Envelope schema id (`v1`) |
+| `time` | INT64 | Unix epoch seconds when the log was emitted |
+| `event_id` | STRING | UUID per invocation |
+| `function` | STRING | Cloud Function entry point (e.g., `run_tsgpayments`) |
+| `region` | STRING | Region or `local` when running locally |
+| `env` | STRING | Deployment environment (`dev`, `prod`, `local`, …) |
+| `target` | STRING | Logical processor alias |
+| `status` | STRING | `OK` or `ERROR` |
+| `http_status` | INT64 | Downstream HTTP status |
+| `latency_ms` | INT64 | Total runtime latency |
+| `tenant` | STRING | Defaults to `default`; extend for multi-tenancy |
+| `severity` | STRING | Log severity emitted |
+| `extra` | JSON | Free-form diagnostic info |
+| `host` | STRING | Mirrors region/function for Splunk friendliness |
+| `source` / `sourcetype` | STRING | Fixed values for Splunk HEC (`gcp.payment-probe`, `payment_probe`) |
 
-Key fields you can filter on:
-- `labels."python_logger"="payment-probe"` (set by `LOG_NAME`; entries land under `run.googleapis.com/stderr`)
-- `jsonPayload.source="gcp.payment-probe"`
-- `jsonPayload.sourcetype="payment_probe"`
-- `jsonPayload.env` (`dev`, `prod`, `local`, etc.)
-- `jsonPayload.target` (e.g., `tsgpayments`, `worldpay`)
-- `jsonPayload.status` (`OK` or `ERROR`)
-- `severity` (`INFO`, `WARNING`, `ERROR`)
+### Default routing & sinks
+| Sink | Default | Consumer | Toggle / Config |
+| --- | --- | --- | --- |
+| Cloud Logging (`run.googleapis.com/stderr`) | Always on | UI, `gcloud logging read` | n/a |
+| BigQuery dataset `payment_probe` | Enabled (`enable_bq_sink=true`) | Ad-hoc SQL, dashboards | `bq_dataset_id`, `bq_location`, partition settings |
+| Pub/Sub topic `probe-logs` | Enabled | Splunk/Dataflow, third-party subscribers | `pubsub_topic_name`, `pubsub_dlq_topic_name` |
+| Dataflow Pub/Sub → Splunk | Disabled by default | Splunk HEC (logs + DLQ) | `enable_splunk_forwarder`, `splunk_*` vars |
+| Future 3rd parties | Add subscriptions to `probe-logs` (Dataflow, Cloud Run, etc.) | Any JSON-friendly consumer | Manage outside Terraform or extend modules |
 
-### Logs Explorer (UI) examples
-- All probe logs (simplest): `jsonPayload.source="gcp.payment-probe"`
-- Only errors: `jsonPayload.source="gcp.payment-probe" severity=ERROR`
-- Per target: `jsonPayload.source="gcp.payment-probe" jsonPayload.target="worldpay"`
-- Per function: `jsonPayload.source="gcp.payment-probe" jsonPayload.function="run_tsgpayments"`
-- By tenant: `jsonPayload.source="gcp.payment-probe" jsonPayload.tenant="default"`
-- By env: `jsonPayload.source="gcp.payment-probe" jsonPayload.env="dev"`
+### Pub/Sub sink quick test
+1. Apply the dev stack (ensures the Log Router sink publishes to Pub/Sub).
+2. Create a temporary subscription (expires in 24h):
+   ```bash
+   PROJECT=payments-test-runner-dev
+   gcloud pubsub subscriptions create probe-logs-tmp \
+     --topic=probe-logs \
+     --expiration-period=24h \
+     --project="$PROJECT"
+   ```
+3. Trigger a run:
+   ```bash
+   gcloud pubsub topics publish tsgpayments-topic-us-central1 --message='{"action":"run"}' --project="$PROJECT"
+   ```
+4. Pull messages:
+   ```bash
+   gcloud pubsub subscriptions pull --auto-ack probe-logs-tmp --project="$PROJECT" --limit=5
+   ```
+5. Clean up if you skipped `--expiration-period`:
+   ```bash
+   gcloud pubsub subscriptions delete probe-logs-tmp --project="$PROJECT"
+   ```
 
-### gcloud examples
+### Streaming to Splunk (Pub/Sub → Dataflow → HEC)
+Recommended production path leverages the Google-managed Dataflow template:
 ```
-PROJECT=payments-test-runner-dev
-# Simplest: all probe envelopes
-gcloud logging read 'jsonPayload.source="gcp.payment-probe"' --project="$PROJECT" --limit=50 --format=json
-
-# Narrow by target
-gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.target="tsgpayments"' --project="$PROJECT" --limit=50 --format=json
-
-# Narrow by function entry point (e.g., run_tsgpayments)
-gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.function="run_tsgpayments"' --project="$PROJECT" --limit=50 --format=json
-
-# Only errors (two options)
-gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND severity=ERROR' --project="$PROJECT" --limit=50 --format=json
-gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.status="ERROR"' --project="$PROJECT" --limit=50 --format=json
-
-# Time range filters
-# Last 1 hour
-gcloud logging read 'jsonPayload.source="gcp.payment-probe"' --project="$PROJECT" --freshness=1h --format=json
-
-# Specific window (RFC3339/ISO8601 UTC)
-gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND timestamp>="2025-10-31T00:00:00Z" AND timestamp<="2025-10-31T23:59:59Z"' \
-  --project="$PROJECT" --format=json
+Cloud Logging → Log Router → Pub/Sub (`probe-logs`) → Subscription (e.g., `probe-logs-splunk`) → Dataflow template → Splunk HEC
 ```
+- Terraform knobs per environment: `enable_splunk_forwarder`, `splunk_hec_url`, `splunk_hec_token_secret_name` (preferred), batching controls, worker sizing, and optional TLS overrides.
+- Provision a Secret Manager secret first:
+  ```bash
+  PROJECT=payments-test-runner-dev
+  gcloud secrets create splunk-hec-token --project="$PROJECT" --replication-policy="automatic"
+  printf 'YOUR-TOKEN-HERE' | gcloud secrets versions add splunk-hec-token --project="$PROJECT" --data-file=-
+  ```
+- Set `splunk_hec_token_secret_name = "splunk-hec-token"` in `variables.tfvars`; Terraform pulls the latest version at apply time.
+- The Dataflow job reuses the release bucket for staging, runs with Streaming Engine enabled, and can be extended to forward logs to other third-party services by swapping the subscriber template (e.g., Pub/Sub → Cloud Run if Splunk is replaced later).
 
-Note: `jsonPayload.target` is the logical processor alias (e.g., `tsgpayments`, `worldpay`) and stays stable across regions. `jsonPayload.function` reflects the function entry point name in the runtime. Use either for scoping; `target` is generally simpler.
+### BigQuery export
+- Defaults: `bq_dataset_id=payment_probe`, `bq_location=US`, `bq_sink_use_partitioned_tables=true`.
+- Query examples:
+  ```bash
+  PROJECT=payments-test-runner-dev
+  bq query --use_legacy_sql=false --project_id="$PROJECT" '
+    SELECT
+      timestamp,
+      jsonPayload.target AS target,
+      jsonPayload.status AS status,
+      jsonPayload.http_status AS http_status,
+      jsonPayload.latency_ms AS latency_ms,
+      jsonPayload.region AS region
+    FROM `payment_probe.run_googleapis_com_stderr`
+    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
+      AND jsonPayload.source = "gcp.payment-probe"
+    ORDER BY timestamp DESC
+    LIMIT 20'
+  ```
+- Count the last hour across stderr/stdout:
+  ```bash
+  bq query --use_legacy_sql=false --project_id="$PROJECT" '
+    SELECT COUNT(1)
+    FROM `payment_probe.run_googleapis_com_stderr`
+    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+      AND jsonPayload.source = "gcp.payment-probe"'
+  ```
+- If you enabled ingestion-time partitioned tables (`bq_sink_use_partitioned_tables=true`), you can further scope queries with `_PARTITIONTIME` (e.g., `WHERE _PARTITIONTIME >= TIMESTAMP_SUB(...)`) to reduce scanned data.
+- Reuse an existing dataset by importing it into Terraform: `terraform import google_bigquery_dataset.probe projects/$PROJECT/datasets/$DATASET_ID`.
+- If you capture stdout in a separate table, add a second query or wrap the `UNION ALL` in logic that skips missing tables (e.g., via scripting or `INFORMATION_SCHEMA.TABLES` checks).
 
-### Splunk notes
-- The log body already contains `time`, `host`, `source`, `sourcetype`, and all probe fields at the top level. If you use HEC, wrap this dict as the `event` payload; if you forward Cloud Logging entries directly, the fields usually appear under `jsonPayload.*`.
-- Depending on how Splunk parsed the payload, fields might exist either directly (e.g., `target`) or under `jsonPayload.*`. The following searches run a single `| spath` and then use `coalesce()` to grab whichever copy is present.
-- Recommended Splunk search examples:
-  - Latest payment probe (dev → `tsgpayments`, last 24h):
-    ```
-    index=payments earliest=-24h latest=now
-    | spath
-    | eval event_id=coalesce('event_id','jsonPayload.event_id')
-    | eval target=coalesce('target','jsonPayload.target')
-    | eval status=coalesce('status','jsonPayload.status')
-    | eval latency_ms=coalesce('latency_ms','jsonPayload.latency_ms')
-    | eval http_status=coalesce('http_status','jsonPayload.http_status')
-    | search labels.env="dev" target="tsgpayments"
-    | table _time event_id target status http_status latency_ms
-    | sort - _time
-    ```
-  - Errors grouped by processor:
-    ```
-    index=payments earliest=-24h latest=now
-    | spath
-    | eval target=coalesce('target','jsonPayload.target')
-    | eval status=coalesce('status','jsonPayload.status')
-    | eval event_id=coalesce('event_id','jsonPayload.event_id')
-    | search status="ERROR"
-    | stats count AS errors latest(event_id) AS last_event by target
-    | sort - errors
-    ```
-  - Latency health check (p95 > 2s):
-    ```
-    index=payments earliest=-24h latest=now
-    | spath
-    | eval target=coalesce('target','jsonPayload.target')
-    | eval latency_ms=coalesce('latency_ms','jsonPayload.latency_ms')
-    | stats perc95(latency_ms) AS p95 avg(latency_ms) AS avg by target
-    | where p95 > 2000
-    ```
-- Routing to Splunk (sink/wiring) is out of scope here; use a Logging sink + Pub/Sub + Splunk HEC (or Splunk GCP add‑on). No transformation is needed—forward the envelope as‑is.
-- Terraform stays module-free but relies on small `for_each` loops so you can manage processors in a single map.
+### Querying logs
+**Cloud Logging (UI or CLI)**
+- All probe logs: `jsonPayload.source="gcp.payment-probe"`
+- Errors only: add `severity=ERROR` or `jsonPayload.status="ERROR"`
+- Per target: `jsonPayload.target="worldpay"`
+- CLI example:
+  ```bash
+  PROJECT=payments-test-runner-dev
+  gcloud logging read 'jsonPayload.source="gcp.payment-probe"' --project="$PROJECT" --limit=50 --format=json
+  gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND jsonPayload.target="tsgpayments"' --project="$PROJECT" --limit=50 --format=json
+  gcloud logging read 'jsonPayload.source="gcp.payment-probe" AND timestamp>="2025-10-31T00:00:00Z" AND timestamp<="2025-10-31T23:59:59Z"' --project="$PROJECT" --format=json
+  ```
+
+**Pub/Sub subscribers**
+- Use the topic `probe-logs`; messages contain the flattened envelope, so existing Dataflow, Splunk, or Cloud Run consumers can ingest without transforms.
+- Dead-lettering defaults to `probe-logs-dlq`; add backlog or delivery alerts separately if your downstream system needs them.
+
+**Splunk searches**
+Run `| spath` once to normalize fields regardless of whether Splunk parsed them at the top level or under `jsonPayload.*`.
+- Latest probe for a target:
+  ```splunk
+  index=payments earliest=-24h latest=now jsonPayload.source="gcp.payment-probe"
+  | spath
+  | eval event_id=coalesce(mvindex(event_id,0), mvindex('jsonPayload.event_id',0))
+  | eval target=coalesce(mvindex(target,0), mvindex('jsonPayload.target',0))
+  | eval status=coalesce(mvindex(status,0), mvindex('jsonPayload.status',0))
+  | eval http_status=coalesce(mvindex(http_status,0), mvindex('jsonPayload.http_status',0))
+  | eval latency_ms=coalesce(mvindex(latency_ms,0), mvindex('jsonPayload.latency_ms',0))
+  | eval env=coalesce(mvindex(env,0), mvindex('jsonPayload.env',0), mvindex(labels.env,0))
+  | search target="tsgpayments"
+  | search env="dev"
+  | table _time env target status http_status latency_ms event_id
+  | sort - _time
+  ```
+- Error summary:
+  ```splunk
+  index=payments earliest=-24h latest=now jsonPayload.source="gcp.payment-probe"
+  | spath
+  | eval event_id=coalesce(mvindex(event_id,0), mvindex('jsonPayload.event_id',0))
+  | eval target=coalesce(mvindex(target,0), mvindex('jsonPayload.target',0))
+  | eval status=coalesce(mvindex(status,0), mvindex('jsonPayload.status',0))
+  | search status="ERROR"
+  | stats count AS errors latest(event_id) AS last_event by target
+  | sort - errors
+  ```
+- Latency health check:
+  ```splunk
+  index=payments earliest=-24h latest=now jsonPayload.source="gcp.payment-probe"
+  | spath
+  | eval target=coalesce(mvindex(target,0), mvindex('jsonPayload.target',0))
+  | eval latency_ms=coalesce(mvindex(latency_ms,0), mvindex('jsonPayload.latency_ms',0))
+  | stats perc95(latency_ms) AS p95 avg(latency_ms) AS avg by target
+  | where p95 > 2000
+  ```
+
+Because the envelope is standardized, the same searches work if logs land in Splunk via HEC, BigQuery via Log Router, or any third-party observability platform you connect through Pub/Sub.
+
+---
+
+## Notes
+- Cloud Functions use Python 3.12; keep dependencies compatible and pin versions before tagging a release.
+- Terraform keeps processors configurable via maps—no modules are required to add/remove processors or regions.
+- As of Oct 29, 2025, there is no GA GCP Mexico region; use São Paulo (`southamerica-east1`) or Santiago (`southamerica-west1`) for Latin America coverage.
