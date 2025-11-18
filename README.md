@@ -104,7 +104,7 @@ PYTHONPATH=. pytest
 ---
 
 ## Release flow (GitHub Actions + artifacts)
-- Pipelines trigger on git tags (`v*`). CI runs `pytest`, builds both processor zips, and uploads them to `gs://code-releases-payments-dev/releases/`.
+- Pipelines trigger on git tags (`v*`). CI runs `pytest`, builds both processor zips, and uploads them to ``.
 - Workflow artifacts named `function-zips-<tag>.zip` remain downloadable from the GitHub UI for manual inspection.
 - Promote a build by referencing the new artifact path in the `functions` map and re-running Terraform; no rebuild is required for prod.
 
@@ -120,7 +120,7 @@ PYTHONPATH=. pytest
 
 ### Bootstrap once
 1. Create two GCP projects (billing enabled), e.g., `payments-test-runner-dev` and `payments-test-runner-prod`.
-2. Create `infra/bootstrap/terraform.tfvars`:
+2. Edit `infra/bootstrap/variables.tfvars` (checked into git) with your project IDs and repo:
    ```hcl
    dev_project_id   = "payments-test-runner-dev"
    prod_project_id  = "payments-test-runner-prod"
@@ -131,7 +131,7 @@ PYTHONPATH=. pytest
    ```bash
    cd infra/bootstrap
    terraform init
-   terraform apply -var-file=terraform.tfvars
+   terraform apply -var-file=variables.tfvars
    ```
 4. Capture outputs and set GitHub secrets:
    ```bash
@@ -151,11 +151,6 @@ PYTHONPATH=. pytest
 project_id      = "payments-test-runner-dev"
 artifact_bucket = "code-releases-payments-dev"
 
-# Logging/export knobs (defaults shown)
-pubsub_topic_name     = "probe-logs"
-pubsub_dlq_topic_name = "probe-logs-dlq"
-enable_bq_sink        = true
-
 functions = {
   tsgpayments = {
     artifact_object = "releases/tsg-v1.0.0.zip"
@@ -170,6 +165,12 @@ functions = {
     schedule        = "*/15 * * * *"
   }
 }
+
+# Splunk forwarding (optional, example shown enabled for dev)
+enable_splunk_forwarder      = true
+splunk_hec_url               = "https://prd-p-3wvvs.splunkcloud.com:8088"
+splunk_hec_token_secret_name = "splunk-hec-token"
+splunk_index                 = "payments"
 ```
 Apply:
 ```bash
@@ -199,6 +200,12 @@ functions = {
     schedule        = "*/10 * * * *"
   }
 }
+
+# Splunk forwarding (optional; prod usually mirrors dev once validated)
+enable_splunk_forwarder      = true
+splunk_hec_url               = "https://prd-p-3wvvs.splunkcloud.com:8088"
+splunk_hec_token_secret_name = "splunk-hec-token"
+splunk_index                 = "payments"
 ```
 Apply with the same `terraform init/plan/apply` flow.
 
@@ -312,7 +319,7 @@ Cloud Logging → Log Router → Pub/Sub (`probe-logs`) → Subscription (e.g., 
       jsonPayload.latency_ms AS latency_ms,
       jsonPayload.region AS region
     FROM `payment_probe.run_googleapis_com_stderr`
-    WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
+    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
       AND jsonPayload.source = "gcp.payment-probe"
     ORDER BY timestamp DESC
     LIMIT 20'
@@ -320,19 +327,14 @@ Cloud Logging → Log Router → Pub/Sub (`probe-logs`) → Subscription (e.g., 
 - Count the last hour across stderr/stdout:
   ```bash
   bq query --use_legacy_sql=false --project_id="$PROJECT" '
-    WITH logs AS (
-      SELECT timestamp, jsonPayload FROM `payment_probe.run_googleapis_com_stderr`
-      WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
-      UNION ALL
-      SELECT timestamp, jsonPayload FROM `payment_probe.run_googleapis_com_stdout`
-      WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)
-    )
     SELECT COUNT(1)
-    FROM logs
+    FROM `payment_probe.run_googleapis_com_stderr`
     WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
       AND jsonPayload.source = "gcp.payment-probe"'
   ```
+- If you enabled ingestion-time partitioned tables (`bq_sink_use_partitioned_tables=true`), you can further scope queries with `_PARTITIONTIME` (e.g., `WHERE _PARTITIONTIME >= TIMESTAMP_SUB(...)`) to reduce scanned data.
 - Reuse an existing dataset by importing it into Terraform: `terraform import google_bigquery_dataset.probe projects/$PROJECT/datasets/$DATASET_ID`.
+- If you capture stdout in a separate table, add a second query or wrap the `UNION ALL` in logic that skips missing tables (e.g., via scripting or `INFORMATION_SCHEMA.TABLES` checks).
 
 ### Querying logs
 **Cloud Logging (UI or CLI)**
@@ -355,30 +357,36 @@ Cloud Logging → Log Router → Pub/Sub (`probe-logs`) → Subscription (e.g., 
 Run `| spath` once to normalize fields regardless of whether Splunk parsed them at the top level or under `jsonPayload.*`.
 - Latest probe for a target:
   ```splunk
-  index=payments earliest=-24h latest=now
+  index=payments earliest=-24h latest=now jsonPayload.source="gcp.payment-probe"
   | spath
-  | eval target=coalesce('target','jsonPayload.target')
-  | eval status=coalesce('status','jsonPayload.status')
-  | search target="tsgpayments" labels.env="dev"
-  | table _time event_id target status http_status latency_ms
+  | eval event_id=coalesce(mvindex(event_id,0), mvindex('jsonPayload.event_id',0))
+  | eval target=coalesce(mvindex(target,0), mvindex('jsonPayload.target',0))
+  | eval status=coalesce(mvindex(status,0), mvindex('jsonPayload.status',0))
+  | eval http_status=coalesce(mvindex(http_status,0), mvindex('jsonPayload.http_status',0))
+  | eval latency_ms=coalesce(mvindex(latency_ms,0), mvindex('jsonPayload.latency_ms',0))
+  | eval env=coalesce(mvindex(env,0), mvindex('jsonPayload.env',0), mvindex(labels.env,0))
+  | search target="tsgpayments"
+  | search env="dev"
+  | table _time env target status http_status latency_ms event_id
   | sort - _time
   ```
 - Error summary:
   ```splunk
-  index=payments earliest=-24h latest=now
+  index=payments earliest=-24h latest=now jsonPayload.source="gcp.payment-probe"
   | spath
-  | eval target=coalesce('target','jsonPayload.target')
-  | eval status=coalesce('status','jsonPayload.status')
+  | eval event_id=coalesce(mvindex(event_id,0), mvindex('jsonPayload.event_id',0))
+  | eval target=coalesce(mvindex(target,0), mvindex('jsonPayload.target',0))
+  | eval status=coalesce(mvindex(status,0), mvindex('jsonPayload.status',0))
   | search status="ERROR"
   | stats count AS errors latest(event_id) AS last_event by target
   | sort - errors
   ```
 - Latency health check:
   ```splunk
-  index=payments earliest=-24h latest=now
+  index=payments earliest=-24h latest=now jsonPayload.source="gcp.payment-probe"
   | spath
-  | eval target=coalesce('target','jsonPayload.target')
-  | eval latency_ms=coalesce('latency_ms','jsonPayload.latency_ms')
+  | eval target=coalesce(mvindex(target,0), mvindex('jsonPayload.target',0))
+  | eval latency_ms=coalesce(mvindex(latency_ms,0), mvindex('jsonPayload.latency_ms',0))
   | stats perc95(latency_ms) AS p95 avg(latency_ms) AS avg by target
   | where p95 > 2000
   ```
